@@ -22,6 +22,7 @@ Every number with its method and its raw file. Two DGX Sparks (GB10), tensor par
 | **this build**, 9 reps | **103.0** (102.4-103.4) | 58.3 (58.1-58.6) | **141.3** (140.8-142.1) | `data/speed/slowmode_servemode` |
 | this build, the speed-suite run | 102.2 | 58.1 | 142.6 | `data/speed/ours_v3_full` |
 | this build, image rebuilt from this repo by `install.sh`, fresh boot | 102.2 | 58.2 | 141.5 | `data/speed/release_v4` |
+| v1.1 (TensorFold's prompt kernels on), image rebuilt by `install.sh`, fresh boot, 3 reps | 102.7 | 57.9 | 141.0 | `data/speed/release_v11` |
 | TensorFold v0.6.0 (Zig engine `ce20a54`) + Mia-AiLab 2.9 bpw | 101.0 | **62.6** | 140.3 | `data/speed/tf_v060_samebox` |
 | same, 9 reps | 100.5 | 62.1 | 139.0 | `data/speed/tf_v060_samebox_b9` |
 | TensorFold v0.5.1 (Python engine `90b68e0`) + Mia-AiLab 2.9 bpw | 100.4 | 60.8 | 140.7 | `data/speed/tf_v051_samebox` |
@@ -47,7 +48,7 @@ Every number with its method and its raw file. Two DGX Sparks (GB10), tensor par
 | decode, set a | 86.6 / 54.2 / 103.7 tok/s | `data/speed/ours_v3_full/kit_decode_a.json` |
 | decode, DSpark off | 44.6 / 44.4 / 44.5 tok/s | `data/speed/ours_v3_nospec` |
 | 2 streams at once (code + prose, 256 tokens each) | 81.6 / 80.2 tok/s aggregate (2 reps) | `data/speed/ours_v3_full/kit_conc.json` |
-| prefill, 8K / 32K prompt, 3 reps (same-box run below) | 1,763 / 1,773 tok/s | `data/speed/ours_v3_prefill/kit_prefill.json` |
+| prefill, 8K / 32K prompt, 3 reps (same-box run below) | 2,090 / 2,092 tok/s since v1.1 (v1: 1,763 / 1,773) | `data/speed/ours_v3_prefill/kit_prefill.json` |
 | prefill in the suite run, 1 rep (cold Engram rows) | 1,565 / 1,764 tok/s | `data/speed/ours_v3_full/kit_prefill.json` |
 | decode after a 32K prompt | 128.2 tok/s (`kit_bench.py depth`: random-token prompt, 256 tokens); 81.7 on a real 32K document (needle ladder, 512 tokens) | `data/speed/ours_v3_full/kit_depth.json` |
 
@@ -58,10 +59,11 @@ random-word prompt every rep, so no prefix cache; time to the first token, promp
 
 | build | 8K | 32K | raw |
 |---|---|---|---|
-| this build | 1,763 (1,407 / 1,763 / 1,781) | 1,773 (1,768 / 1,776 / 1,773) | `data/speed/ours_v3_prefill` |
+| this build, v1 | 1,763 (1,407 / 1,763 / 1,781) | 1,773 (1,768 / 1,776 / 1,773) | `data/speed/ours_v3_prefill` |
+| this build, v1.1 (Oct 13, the serve warm) | 2,090 (2,090 / 2,097 / 2,090) | 2,092 (2,101 / 2,092 / 2,092) | `data/speed/release_v11/kit_prefill_3rep.json` |
 | TensorFold v0.6.0 + Mia-AiLab 2.9 bpw | **2,163** (2,111 / 2,193 / 2,163) | **2,276** (2,295 / 2,276 / 2,252) | `data/speed/tf_v060_samebox_prefill` |
 
-TensorFold prefills 1.23x / 1.28x faster here (its author publishes 2,433 / 2,495 on his boxes). Each engine's first 8K
+TensorFold prefilled 1.23x / 1.28x faster than v1 here, and 1.03x / 1.09x faster than v1.1 (its author publishes 2,433 / 2,495 on his boxes). Each engine's first 8K
 rep finds Engram's rows cold.
 
 ## How the speed came (code, tok/s)

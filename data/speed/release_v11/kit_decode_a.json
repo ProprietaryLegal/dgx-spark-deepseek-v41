@@ -1,0 +1,83 @@
+{
+ "cmd": "decode",
+ "base": "http://localhost:8000",
+ "model": "dsv41",
+ "unix": 1791828673.1134503,
+ "result": [
+  {
+   "set": "a",
+   "prompt": "code",
+   "max_tokens": 384,
+   "reps": 3,
+   "decode_tps_median": 86.82817132894404,
+   "decode_tps_all": [
+    86.838,
+    86.298,
+    86.828
+   ],
+   "tokens_all": [
+    384,
+    384,
+    384
+   ],
+   "chunks_all": [
+    106,
+    106,
+    106
+   ],
+   "ttft_s_median": 0.2787377650020062,
+   "identical_texts": true,
+   "sample": "# Thread-Safe LRU Cache with Per-Entry TTL\n\nBelow is a complete implementation of a thread-safe LRU cache with per-entry TTL expiry, followed by a comprehensive `unittest` test suite.\n\n## Implementation\n\n```python\n\"\"\"\nthread_safe_lru_ttl.py\n\nA thread-safe LRU cache with per-entry time-to-live (TTL) expiry.\n\nDesign notes\n------------\n* Uses an ``OrderedDict`` to maintain LRU ordering in O(1) per op"
+  },
+  {
+   "set": "a",
+   "prompt": "prose",
+   "max_tokens": 384,
+   "reps": 3,
+   "decode_tps_median": 53.623800420614565,
+   "decode_tps_all": [
+    53.193,
+    53.978,
+    53.624
+   ],
+   "tokens_all": [
+    384,
+    384,
+    384
+   ],
+   "chunks_all": [
+    201,
+    201,
+    201
+   ],
+   "ttft_s_median": 0.27093103900188,
+   "identical_texts": true,
+   "sample": "# The Beacon and the Keeper: A History of Lighthouses\n\nLong before they were towers of stone and glass, lighthouses were fires on hills. The impulse is ancient and almost instinctive: a human being, standing at the edge of the sea, holding up a light against the dark. The Pharos of Alexandria, built in the third century BCE, was among the first great monuments to this impulse\u2014a limestone tower per"
+  },
+  {
+   "set": "a",
+   "prompt": "structured",
+   "max_tokens": 384,
+   "reps": 3,
+   "decode_tps_median": 104.54320642854512,
+   "decode_tps_all": [
+    104.543,
+    104.639,
+    104.474
+   ],
+   "tokens_all": [
+    384,
+    384,
+    384
+   ],
+   "chunks_all": [
+    82,
+    82,
+    82
+   ],
+   "ttft_s_median": 0.2998873350006761,
+   "identical_texts": true,
+   "sample": "[\n  {\n    \"id\": 1,\n    \"name\": \"Ava Thompson\",\n    \"department\": \"Engineering\",\n    \"title\": \"Chief Technology Officer\",\n    \"salary\": 215000,\n    \"start_date\": \"2015-03-12\",\n    \"manager_id\": null,\n    \"skills\": [\"System Architecture\", \"Leadership\", \"Cloud Infrastructure\"]\n  },\n  {\n    \"id\": 2,\n    \"name\": \"Marcus Lee\",\n    \"department\": \"Engineering\",\n    \"title\": \"Engineering Manager\",\n    \"sal"
+  }
+ ]
+}

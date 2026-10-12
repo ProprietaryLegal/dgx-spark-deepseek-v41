@@ -9,11 +9,17 @@ The official checkpoint (`deepseek-ai/DeepSeek-V4.1-Flash` @ `2cba9e42`) is 510 
 - the 15,360 routed experts re-encoded in EXL3 at 2, 3, 4 or 5 bits per weight, chosen per expert from measured sensitivity, 2.70 bpw on average (289 GB down to about 184 GB),
 - the Engram tables read from the checkpoint files on NVMe at lookup time, CUDA-graph safe, so they never sit in memory,
 - the dense linears and the LM head on EXL3 too (K4, `wo_a` K5, head K4), and the DSpark drafter's dense layers (K5) and routed experts (K3), all through our decode kernels `exl3_mrow` and `exl3_smoe`,
-- per-round DSpark draft depth from a measured cost table, TensorFold's RDMA all-reduce ring and paced L2 prefetch (Apache-2.0, credited), FlashInfer autotune off.
+- per-round DSpark draft depth from a measured cost table, TensorFold's RDMA all-reduce ring, paced L2 prefetch and, since v1.1, its grouped EXL3 prompt kernels for the routed experts (Apache-2.0, credited), FlashInfer autotune off.
 
 Weights: [`sudoingx/DeepSeek-V4.1-Flash-EXL3-2.7bpw`](https://huggingface.co/sudoingx/DeepSeek-V4.1-Flash-EXL3-2.7bpw) (196 GB; the two Engram shards come from DeepSeek's own repo, quickstart step 3).
 
 Build: v3 (`dsv41-recipe-exl3-v3b-dk5-h4-dx3` on our boxes; see [How it works](#how-it-works) for what v2, v2.1 and v3 contain).
+
+**v1.1 (Oct 13 2026), same weights:**
+- **Prefill:** TensorFold's grouped EXL3 prompt kernels for the routed experts are on by default (`VLLM_EXL3_MOE_TF_PROMPT=1`). Prefill is 2,090 / 2,092 tok/s at 8K / 32K (v1: 1,763 / 1,773, so +18.5% / +18.0%). A 255,709-token prompt's first token arrives in 159.6 s (v1: 183.3 s).
+- **Decode is unchanged:** set b 102.7 / 57.9 / 141.0 tok/s on a fresh v1.1 boot, and greedy output is identical to v1 on all 24 oracle prompts.
+- **Boots:** the JIT kernel builds now stay in the mounted cache, so a boot no longer recompiles them.
+- **To update:** `scripts/launch/dsv41_tp2.sh down`, then `git pull` and `./install.sh` in `~/dsv41_recipe` (images only, the wheels are kept), then `up` again.
 
 > **Target hardware:** 2x NVIDIA DGX Spark. GB10 Grace-Blackwell, compute `sm_121`, 128 GB unified LPDDR5X each, about 273 GB/s, a ConnectX-7 cable between the two boxes (RoCE v2), DGX OS (Ubuntu 24.04), CUDA 13.0, driver 580.x (tested on 580.142 and 580.173.02), aarch64. Tensor parallel 2, one rank per box.
 
@@ -34,8 +40,8 @@ Every number below was measured on the same two Sparks. Comparison builds were r
 | decode, code / prose / structured, DSpark off | 44.6 / 44.4 / 44.5 tok/s | not measured | not measured | not measured |
 | decode, set a, code / prose / structured | 86.6 / 54.2 / 103.7 tok/s | not measured | not measured | not measured |
 | 2 streams at once (code + prose, 256 tokens each), aggregate | 81.6 / 80.2 tok/s (2 reps) | not measured | not measured | not measured |
-| prefill, 8K / 32K prompt (`kit_bench.py prefill`, median of 3) | 1,763 / 1,773 tok/s | **2,163 / 2,276 tok/s** | not measured | not measured |
-| decode after a 32K prompt | 81.7 tok/s (a needle-ladder document, 512 tokens); 128.2 tok/s on `kit_bench.py depth` (random-token prompt, 256 tokens) | not measured | not measured | not measured |
+| prefill, 8K / 32K prompt (`kit_bench.py prefill`, median of 3) | 2,090 / 2,092 tok/s (v1.1; v1: 1,763 / 1,773) | **2,163 / 2,276 tok/s** | not measured | not measured |
+| decode after a 32K prompt | 81.7 tok/s (a needle-ladder document, 512 tokens); 128.2 tok/s on `kit_bench.py depth` (random-token prompt, 256 tokens; this one swings 58-128 tok/s run to run with the continuation's DSpark acceptance, 25-68%) | not measured | not measured | not measured |
 
 Raw files and method for every row: [BENCHMARKS.md](BENCHMARKS.md). Greedy output is identical run to run on all three prompts for this build and for TensorFold. The rows from set a down come from one run of `scripts/bench/serve_speed_suite.sh` on the recipe defaults (Oct 12 02:14-02:37; its set b measured 102.2 / 58.1 / 142.6), DSpark off from a boot with `SPEC=` (empty). The prefill row is its own run, both engines on fresh boots with the same client, 3 reps each (Oct 12 13:21-13:36); the first 8K rep of each reads Engram's rows cold (ours 1,407, TensorFold 2,111 tok/s). Only 2 sequences are served at once (`MAX_SEQS=2`, for the 262K context); TensorFold serves 4. The decode rows are generated from the raw result files by `scripts/bench/results_table.py` (this build: the recipe defaults, median of 9 reps a prompt, Oct 12 00:23; every rep within 102.4-103.4 / 58.1-58.6 / 140.8-142.1). TensorFold's column is its 9-rep median (Oct 12, same session), with slow reps on all three prompts (ours: none in 27); its 3-rep run measured 101.0 / 62.6 / 140.3. Keep the page-cache guard off while serving (`guards.sh serve`): its drops evict Engram's hot rows and gave structured an intermittent ~5% slow mode.
 
@@ -82,8 +88,8 @@ Suites, greedy, thinking off, 2,048 max tokens, paired per item against the nati
 | | this build |
 |---|---|
 | context per request | 262,144 tokens, needle ladder 8K / 32K / 64K / 128K / 256K: 3/3 at every depth |
-| the 256K rung (a 255,709-token prompt) | cold prefill 183 s (1,395 tok/s), needles 3/3, decode after it 76.4 tok/s (512 tokens), lowest MemAvailable during it 7.5 GiB |
-| MemAvailable after load, head / worker | 9 / 9 GiB |
+| the 256K rung (a 255,709-token prompt) | v1.1: cold prefill 159.6 s (1,602 tok/s), needles 3/3, decode after it 72.3 tok/s (512 tokens), lowest MemAvailable during it 6.5 GiB. v1: 183 s (1,395 tok/s), 76.4 tok/s, 7.5 GiB |
+| MemAvailable after load, head / worker | 8 / 9 GiB (v1.1; v1: 9 / 9) |
 | OpenAI API check (tools, streaming, reasoning) | 14 of 14 |
 | 2-hour agent soak | not run yet |
 
@@ -136,7 +142,7 @@ Environment variables read by `scripts/launch/dsv41_tp2.sh`, same values on both
 | `MAX_LEN`, `MAX_SEQS`, `MAX_BATCH` | 262144, 2, 2048 | context per request, concurrent sequences, prefill chunk |
 | `UTIL` | 0.88 | `--gpu-memory-utilization` |
 | `KV_BYTES` | 2684354560 | KV pool per rank pinned at 2.5 GiB (empty: sized from `UTIL`) |
-| `RECIPE_ENV` | the measured-best knobs | our kernel, prefetch, all-reduce and DSpark settings with the round-cost table, listed in the launcher; empty runs without them |
+| `RECIPE_ENV` | the measured-best knobs | our kernel, prefetch, all-reduce and DSpark settings with the round-cost table, listed in the launcher (v1.1 adds `VLLM_EXL3_MOE_TF_PROMPT=1`, the prompt kernels, and `TORCH_EXTENSIONS_DIR` in the mounted cache); empty runs without them |
 | `SPEC` | DSpark, 5 tokens | `--speculative-config` JSON, empty = off |
 | `GRAPH` | `FULL_DECODE_ONLY` | CUDA graphs for decode only |
 | `ENGRAM` | disk offload, 256 reader threads | `--engram-config` JSON |
@@ -289,7 +295,7 @@ Calibration (v3, `cal_v3`): 766 sequences, 853,106 tokens = the base set, 374 se
 - **vLLM**: Apache-2.0. Patches 0001 (PR #56509 by zeenat28-ui) and 0003 (PR #58560 by bluemelov1) are upstream work carried unchanged with credit.
 - **exllamav3** (turboderp, MIT): the EXL3 quantizer and kernels, called through its public functions; nothing vendored.
 - **Marlin** (IST-DASLab, as extended in vLLM), **CUTLASS** (NVIDIA) and **FlashInfer**: the kernels this engine runs on.
-- **TensorFold** (Apache-2.0; ashhart/TensorFold and bertholomus's DeepSeek-V4.1 fork): the RDMA all-reduce ring and the paced L2 prefetch kernel are adapted from it; the sparse verify attention's structure, the shared expert as one more slot of the routed-expert launch, the per-round depth rule (0010) and the cached Markov rows (0011) follow its designs. Each adapted file is listed in `NOTICE` and `patches/exl3_moe/vllm_exl3_moe/csrc/NOTICE.tensorfold`.
+- **TensorFold** (Apache-2.0; ashhart/TensorFold and bertholomus's DeepSeek-V4.1 fork): the RDMA all-reduce ring and the paced L2 prefetch kernel are adapted from it, and its grouped EXL3 prompt kernels for the routed experts are vendored unchanged (`csrc/tf_experts/`, on by default since v1.1); the sparse verify attention's structure, the shared expert as one more slot of the routed-expert launch, the per-round depth rule (0010) and the cached Markov rows (0011) follow its designs. Each adapted file is listed in `NOTICE` and `patches/exl3_moe/vllm_exl3_moe/csrc/NOTICE.tensorfold`.
 - **bertholomus**: `kit_bench.py`, the client behind the speed table.
 - **Prior art**: 0xSero's DeepSeek-V4.1-Flash build for two Sparks and 0xSero's `local-ai-images` repo (read for GB10 build lessons, no code used), Mia-AiLab's EXL3 2.9 bpw pack and vLLM kit. Their builds were measured here as baselines; nothing of theirs is in these weights or this engine.
 - This repo (scripts, patches 0000, 0002 and 0004-0022, the plugin): Apache-2.0.

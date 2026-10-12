@@ -1,0 +1,22 @@
+{
+ "cmd": "prefill",
+ "base": "http://localhost:8000",
+ "model": "dsv41",
+ "unix": 1791828707.0428011,
+ "result": [
+  {
+   "length": 8192,
+   "rep": 0,
+   "prompt_tokens": 8192,
+   "ttft_s": 4.346318681000412,
+   "prefill_tps": 1884.8134711821017
+  },
+  {
+   "length": 32768,
+   "rep": 0,
+   "prompt_tokens": 32768,
+   "ttft_s": 15.630294549999235,
+   "prefill_tps": 2096.4416182420314
+  }
+ ]
+}

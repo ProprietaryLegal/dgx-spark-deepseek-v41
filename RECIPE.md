@@ -128,7 +128,8 @@ gated (LOG Oct 11):
 ConnectX link (NCCL pinned to the HCA that carries the fabric IPv4), Engram on disk, DSpark drafter, V4.1 tool and
 reasoning parsers, text-only by default. Knobs at the top of the script. The measured configuration is the default
 (`RECIPE_ENV` in the script: our MoE knobs, DSpark k=5 with per-round depth `conf` and the measured round-cost table,
-the Markov bias cache with its token list copied to each node, the paced L2 prefetch and the RDMA all-reduce ring):
+the Markov bias cache with its token list copied to each node, the paced L2 prefetch and the RDMA all-reduce ring, and
+since v1.1 TensorFold's grouped EXL3 prompt kernels for the routed experts with the JIT builds in the mounted cache):
 
 ```
 MODEL_DIR=/home/spark/models/dsv41-recipe-exl3-v3b-dk5-h4-dx3 scripts/launch/dsv41_tp2.sh up   # image dsv41-serve:v4, the launcher's default

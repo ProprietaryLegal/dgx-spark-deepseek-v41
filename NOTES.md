@@ -18,8 +18,9 @@ DGX Sparks unless a line says otherwise.
 
 - **Prose decode:** 58.3 tok/s against 62.1 for TensorFold v0.6.0 on the same boxes (9-rep medians, 94%). Prose drafts less well, so
   a round's fixed cost weighs more; the fixed cost is the lever.
-- **Prefill:** 1,763 / 1,773 tok/s at 8K / 32K against TensorFold v0.6.0's 2,163 / 2,276 on the same boxes (3-rep
-  medians): 1.23-1.28x behind. Each EXL3 linear in a prompt chunk runs exllamav3's general path (a full weight
+- **Prefill:** 2,090 / 2,092 tok/s at 8K / 32K since v1.1 (TensorFold's grouped EXL3 prompt kernels for the routed
+  experts; v1: 1,763 / 1,773) against TensorFold v0.6.0's 2,163 / 2,276 on the same boxes (3-rep medians): 1.03-1.09x
+  behind, from 1.23-1.28x. What follows describes v1's gap: Each EXL3 linear in a prompt chunk runs exllamav3's general path (a full weight
   reconstruct, two Hadamard passes and dtype casts around the GEMM); a path that decodes the trellis once per chunk and
   folds the rotations into the GEMM (TensorFold's prompt kernels do) is the lever.
 - **Context:** 262,144 tokens a request (the 256K needle rung passes 3/3 with >= 7.5 GiB free on both boxes). A 1M

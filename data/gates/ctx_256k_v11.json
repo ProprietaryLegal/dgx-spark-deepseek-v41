@@ -1,0 +1,26 @@
+{
+ "serve": "v11_256k",
+ "spec": "drafts",
+ "depth_target": 262144,
+ "prompt_tokens": 255709,
+ "cached_tokens_r2": null,
+ "ttft_cold_s": 159.61013353907038,
+ "prefill_tok_s": 1602.0849950445404,
+ "needle_hits": 3,
+ "answer": "Amber: 6288254, Cobalt: 5826910, Saffron: 3359519",
+ "codes": [
+  "6288254",
+  "5826910",
+  "3359519"
+ ],
+ "ttft_warm_s": 1.1550352240446955,
+ "decode_tok_s": 72.30854534159458,
+ "decode_tokens": 512,
+ "errors": [],
+ "mem_after_mb": {
+  "head": 6990,
+  "worker": 7501
+ },
+ "min_mem_available_mb_during": 6705,
+ "build": "v1.1: VLLM_EXL3_MOE_TF_PROMPT=1 (TensorFold's grouped EXL3 prompt kernels for the routed experts)"
+}

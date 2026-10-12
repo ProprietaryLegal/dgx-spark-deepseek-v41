@@ -1,0 +1,1 @@
+set b DSpark: accepted 2533 of 5140 drafted (49.3%), mean accepted per verify step 2.46 (+1 bonus token)

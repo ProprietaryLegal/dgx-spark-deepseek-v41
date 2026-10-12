@@ -9,7 +9,8 @@ following third-party work:
 - exllamav3 (MIT, github.com/turboderp-org/exllamav3): the EXL3 trellis format, its quantizer and kernels, called by our
   plugin and quantization scripts, not copied (license text: patches/exl3_moe/vllm_exl3_moe/csrc/LICENSE.exllamav3).
 - TensorFold (Apache-2.0, github.com/ashhart/TensorFold and bertholomus's DeepSeek-V4.1 fork): the RDMA all-reduce ring,
-  the paced L2 prefetch kernel, and design ideas behind the sparse verify attention and the shared-expert slot, each
+  the paced L2 prefetch kernel, its grouped EXL3 prompt kernels for the routed experts (copied unchanged into
+  csrc/tf_experts/ from TensorFold commit 90b68e06, on by default since v1.1), and design ideas behind the sparse verify attention and the shared-expert slot, each
   file marked and listed in patches/exl3_moe/vllm_exl3_moe/csrc/NOTICE.tensorfold, which carries TensorFold's NOTICE:
 
     TensorFold

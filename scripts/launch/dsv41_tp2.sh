@@ -37,11 +37,13 @@ EXTRA=${EXTRA:-}
 # ring and the prefetch on), Markov bias rows cached (patch 0011; the token list is copied to each node's cache below),
 # the paced L2 prefetch and the RDMA all-reduce ring (plugin), and the levers picked since: the local draft argmax
 # (0012), smoe run flags (evict-first is compiled in), mHC overlap (0014), the Engram spin reader (0015), short-context
-# graph twins (0019), our router with its gate in L2, exl3_mrow's grouped launch. The round-cost table is the one
+# graph twins (0019), our router with its gate in L2, exl3_mrow's grouped launch, and since v1.1 TensorFold's grouped
+# EXL3 prompt kernels for the routed experts (Apache-2.0, plugin csrc/tf_experts/: prefill +18-20%, decode unchanged)
+# with the JIT builds kept in the mounted cache (no recompile on every boot). The round-cost table is the one
 # measured on the shipping weights (drafter experts on EXL3 K3; scripts/bench/depth_sweep.sh at fixed depths, Oct 12);
 # re-measure it after changing weights, image or knobs. RECIPE_ENV= (empty) runs without them; DOCKER_ENV comes after
 # it, so a knob there overrides the same knob here.
-RECIPE_ENV=${RECIPE_ENV-"VLLM_EXL3_MOE_PARALLEL_GROUPS=1 EXL3_MOE_COOP_WIDE=1 EXL3_INT8_GEMV=0 VLLM_DSPARK_DEPTH_POLICY=conf VLLM_DSPARK_ROUND_MS=28.90,32.85,36.57,40.13,42.62,45.69 VLLM_DSPARK_DRAFT_MS=0 VLLM_DSPARK_MARKOV_CACHE=/root/.cache/markov_top_tokens.json EXL3_L2PF=attn,moe,next EXL3_RDMA_AR=1 VLLM_SHORT_CTX_BOUNDS=512,1025 EXL3_ROUTER=1 EXL3_L2PF_HC=1 VLLM_DSPARK_LOCAL_ARGMAX=1 EXL3_SMOE_FLAGS=-DSMOE_RUNFLAGS=1 VLLM_DSV41_MHC_OVERLAP=1 VLLM_ENGRAM_DISK_SPIN_MS=1000 EXL3_MROW_GROUPED=1"}
+RECIPE_ENV=${RECIPE_ENV-"VLLM_EXL3_MOE_PARALLEL_GROUPS=1 EXL3_MOE_COOP_WIDE=1 EXL3_INT8_GEMV=0 VLLM_DSPARK_DEPTH_POLICY=conf VLLM_DSPARK_ROUND_MS=28.90,32.85,36.57,40.13,42.62,45.69 VLLM_DSPARK_DRAFT_MS=0 VLLM_DSPARK_MARKOV_CACHE=/root/.cache/markov_top_tokens.json EXL3_L2PF=attn,moe,next EXL3_RDMA_AR=1 VLLM_SHORT_CTX_BOUNDS=512,1025 EXL3_ROUTER=1 EXL3_L2PF_HC=1 VLLM_DSPARK_LOCAL_ARGMAX=1 EXL3_SMOE_FLAGS=-DSMOE_RUNFLAGS=1 VLLM_DSV41_MHC_OVERLAP=1 VLLM_ENGRAM_DISK_SPIN_MS=1000 EXL3_MROW_GROUPED=1 VLLM_EXL3_MOE_TF_PROMPT=1 TORCH_EXTENSIONS_DIR=/root/.cache/torch_extensions"}
 DOCKER_ENV=${DOCKER_ENV:-}
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 NAME=dsv41-serve
