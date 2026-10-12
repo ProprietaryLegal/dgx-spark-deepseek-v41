@@ -1,0 +1,52 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0005.
+Two hooks so a quantization plugin can serve DeepSeek-V4.1's dense linears in a non-FP8 format (the recipe's
+vllm_exl3_moe plugin: EXL3 trellis wq_b / wo_a / wo_b / shared expert, ~5 bits per weight against MXFP8's 8.25; the
+dense FP8 linears are ~34% of a TP=2 decode step on GB10 and bandwidth-bound):
+1. deep_gemm_fp8_o_proj: if wo_a carries `grouped_bmm` (o_rot [tokens, groups, K] -> [tokens, groups, N]), run the
+   inverse RoPE unquantized and hand the groups to it, before the SM12x Marlin and FP8 paths.
+2. _pad_shared_expert_weight: leave tensors without the intermediate axis (sign vectors, scalars) alone instead of
+   indexing a dimension they do not have. Both are no-ops for the checkpoint's own FP8 tensors.
+
+diff --git a/vllm/models/deepseek_v4/nvidia/ops/o_proj.py b/vllm/models/deepseek_v4/nvidia/ops/o_proj.py
+index a649f8a..e5232dc 100644
+--- a/vllm/models/deepseek_v4/nvidia/ops/o_proj.py
++++ b/vllm/models/deepseek_v4/nvidia/ops/o_proj.py
+@@ -58,6 +58,23 @@ def deep_gemm_fp8_o_proj(
+     kernel, one ``wo_a`` group per slot with the live groups first, so only
+     the padding groups are sliced off.
+     """
++    grouped_bmm = getattr(wo_a, "grouped_bmm", None)
++    if grouped_bmm is not None and not isinstance(o, QuantizedActivation):
++        # A quantization method that runs wo_a group by group itself (e.g. EXL3
++        # trellis weights): o_rot [tokens, groups, K] -> [tokens, groups, N].
++        o_rot, _ = fused_inv_rope_fp8_quant(
++            o,
++            positions,
++            cos_sin_cache,
++            n_groups=n_groups,
++            heads_per_group=heads_per_group,
++            nope_dim=nope_dim,
++            rope_dim=rope_dim,
++            quant_group_size=einsum_recipe[2],
++            tma_aligned_scales=tma_aligned_scales,
++            quantize=False,
++        )
++        return wo_b(grouped_bmm(o_rot).flatten(1))
+     if getattr(wo_a, "sm12x_bmm_groups", None) and not isinstance(
+         o, QuantizedActivation
+     ):
+diff --git a/vllm/models/deepseek_v41/nvidia/model.py b/vllm/models/deepseek_v41/nvidia/model.py
+index bec0353..d1b6dc6 100644
+--- a/vllm/models/deepseek_v41/nvidia/model.py
++++ b/vllm/models/deepseek_v41/nvidia/model.py
+@@ -1328,6 +1328,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
+             1 if name.endswith(("weight_scale_inv", "weight_scale")) else block_size[0]
+         )
+         dim = 1 if ".down_proj." in name else 0
++        if loaded_weight.dim() <= dim:
++            # Not a [rows, cols] weight (e.g. a quantization plugin's sign
++            # vectors or scalars): nothing to pad along the intermediate axis.
++            return loaded_weight
+         mult = get_tensor_model_parallel_world_size() * step
+         pad = cdiv(loaded_weight.shape[dim], mult) * mult - loaded_weight.shape[dim]
+         if pad == 0:

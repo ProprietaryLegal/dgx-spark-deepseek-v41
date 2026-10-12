@@ -1,0 +1,540 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patch 0001.
+Engram disk offload for unified-memory boxes (GB10): table rows are read from the checkpoint's safetensors shards at
+lookup time (pread pool in engram_disk.cpp, enqueued as a host node on the lookup stream) into pinned staging that the
+upstream lookup kernel reads through UVA, instead of ~100 GB of pinned host tables per rank at TP=2.
+Oct 8: the eager-only event guard between the inline and prefetch streams is skipped under CUDA graph capture (a wait on
+an event recorded outside the capture invalidated FULL_DECODE_ONLY capture; each captured forward joins the prefetch
+stream before reading its rows).
+
+diff --git a/vllm/config/engram.py b/vllm/config/engram.py
+index fd95bc2..2699498 100644
+--- a/vllm/config/engram.py
++++ b/vllm/config/engram.py
+@@ -55,6 +55,23 @@ class EngramConfig:
+     effort, falls back to ordinary pinned pages). Prefaulting the tables at
+     startup takes longer. Requires cpu_offload without dp_shared_memory."""
+ 
++    disk_offload: bool = False
++    """Read table rows from the checkpoint's safetensors shards at lookup time
++    instead of holding the tables in memory. For unified-memory systems (e.g.
++    DGX Spark / GB10), where host and GPU share one pool and the tables (about
++    100 GB per rank at TP=2 for DeepSeek-V4.1-Flash) cannot fit next to the
++    model. Rows are staged in pinned memory and read by the lookup kernel
++    through UVA, so it requires cpu_offload without dp_shared_memory, use_thp
++    or embedding_across_dp. The model must be a local directory (or an HF id
++    already in the local cache)."""
++
++    disk_threads: int = 32
++    """Reader threads per Engram layer for disk_offload."""
++
++    disk_cache_rows: int = 0
++    """Rows per Engram layer kept in a host hot-row cache for disk_offload
++    (0 disables the cache; each row costs dim + dim / block_size bytes)."""
++
+     @model_validator(mode="after")
+     def _validate_shared_memory(self) -> Self:
+         if self.dp_shared_memory and not self.cpu_offload:
+@@ -63,6 +80,18 @@ class EngramConfig:
+             raise ValueError(
+                 "use_thp requires cpu_offload=True and dp_shared_memory=False"
+             )
++        if self.disk_offload and (
++            not self.cpu_offload
++            or self.dp_shared_memory
++            or self.use_thp
++            or self.embedding_across_dp
++        ):
++            raise ValueError(
++                "disk_offload requires cpu_offload=True, dp_shared_memory=False, "
++                "use_thp=False and embedding_across_dp=False"
++            )
++        if self.disk_threads < 1 or self.disk_cache_rows < 0:
++            raise ValueError("disk_threads must be >= 1 and disk_cache_rows >= 0")
+         return self
+ 
+     def verify_model_config(self, model_config: "ModelConfig | None") -> None:
+@@ -88,6 +117,7 @@ class EngramConfig:
+             self.dp_shared_memory = (
+                 self.cpu_offload
+                 and not self.use_thp
++                and not self.disk_offload
+                 and parallel_config.data_parallel_size > 1
+                 and not parallel_config.enable_elastic_ep
+             )
+diff --git a/vllm/models/deepseek_v41/common/engram.py b/vllm/models/deepseek_v41/common/engram.py
+index d4810ee..7730680 100644
+--- a/vllm/models/deepseek_v41/common/engram.py
++++ b/vllm/models/deepseek_v41/common/engram.py
+@@ -35,6 +35,7 @@ chunk-by-chunk while an n-gram at position ``p`` needs the token ids at
+ """
+ 
+ import ctypes
++import json
+ import mmap
+ import os
+ import tempfile
+@@ -590,6 +591,60 @@ class NgramHashState(nn.Module):
+         return output
+ 
+ 
++def _safetensors_tensor_offset(path: str, name: str) -> int:
++    """Absolute byte offset of tensor `name` inside a safetensors file."""
++    with open(path, "rb") as f:
++        header_len = int.from_bytes(f.read(8), "little")
++        header = json.loads(f.read(header_len))
++    return 8 + header_len + header[name]["data_offsets"][0]
++
++
++def _resolve_engram_disk_source(layer_id: int) -> tuple[str, int, str, int]:
++    """(weight file, offset, scale file, offset) of a layer's Engram table in
++    the checkpoint, for EngramConfig.disk_offload."""
++    model_config = get_current_vllm_config().model_config
++    model_dir = model_config.model
++    if not os.path.isdir(model_dir):
++        from huggingface_hub import snapshot_download
++
++        model_dir = snapshot_download(
++            model_dir, revision=model_config.revision, local_files_only=True
++        )
++    with open(os.path.join(model_dir, "model.safetensors.index.json")) as f:
++        weight_map = json.load(f)["weight_map"]
++    source: list = []
++    for suffix in ("weight", "scale"):
++        name = f"layers.{layer_id}.engram.embed.{suffix}"
++        path = os.path.join(model_dir, weight_map[name])
++        source += [path, _safetensors_tensor_offset(path, name)]
++    return tuple(source)  # type: ignore[return-value]
++
++
++_ENGRAM_DISK_EXT = None
++
++
++def _load_engram_disk_ext():
++    """The host-side row reader (engram_disk.cpp), JIT-built once per env."""
++    global _ENGRAM_DISK_EXT
++    if _ENGRAM_DISK_EXT is None:
++        from torch.utils.cpp_extension import load
++
++        _ENGRAM_DISK_EXT = load(
++            name="vllm_engram_disk",
++            sources=[os.path.join(os.path.dirname(__file__), "engram_disk.cpp")],
++            extra_cflags=["-O2"],
++            with_cuda=True,
++            verbose=False,
++        )
++    return _ENGRAM_DISK_EXT
++
++
++def _engram_disk_noop_loader(
++    param: torch.nn.Parameter, loaded_weight: torch.Tensor
++) -> None:
++    """Disk-offloaded tables are read from the shards at lookup time."""
++
++
+ def _engram_head_shard_weight_loader(
+     param: torch.nn.Parameter, loaded_weight: torch.Tensor
+ ) -> None:
+@@ -931,10 +986,21 @@ class ParallelEngramEmbedding(nn.Module):
+         cpu_offload: bool = False,
+         dp_shared_memory: bool = False,
+         use_thp: bool = False,
++        disk_source: tuple[str, int, str, int] | None = None,
++        disk_threads: int = 32,
++        disk_cache_rows: int = 0,
+     ) -> None:
+         super().__init__()
+         assert head_sizes and all(size > 0 for size in head_sizes)
+         assert sum(head_sizes) <= num_embeddings
++        self.disk_offload = disk_source is not None
++        if self.disk_offload:
++            if not cpu_offload or dp_shared_memory or use_thp:
++                raise ValueError(
++                    "Engram disk offload requires cpu_offload without "
++                    "dp_shared_memory or use_thp"
++                )
++            self._weight_loader = _engram_disk_noop_loader
+         self.cpu_offload = cpu_offload
+         self.dp_shared_memory = dp_shared_memory
+         self.use_thp = use_thp
+@@ -985,7 +1051,35 @@ class ParallelEngramEmbedding(nn.Module):
+                     "engram_vocab_start": self.vocab_start_idx,
+                 },
+             )
+-        if cpu_offload:
++        self._disk = None
++        self._disk_views: tuple[torch.Tensor, torch.Tensor] | None = None
++        self._disk_recorded = False
++        if self.disk_offload:
++            assert disk_source is not None
++            weight_file, weight_offset, scale_file, scale_offset = disk_source
++            self._disk = _load_engram_disk_ext().EngramDiskTable(
++                weight_file,
++                weight_offset,
++                scale_file,
++                scale_offset,
++                self.vocab_start_idx,
++                self.part_num_embeddings,
++                dim,
++                dim // block_size,
++                disk_cache_rows,
++                disk_threads,
++            )
++            logger.info(
++                "Engram table read from disk at lookup time: %d rows x %d "
++                "(%.2f GiB) from %s, %d reader threads, %d cached rows",
++                self.part_num_embeddings,
++                dim,
++                self.part_num_embeddings * (dim + dim // block_size) / 1024**3,
++                weight_file,
++                disk_threads,
++                disk_cache_rows,
++            )
++        elif cpu_offload:
+             # Constant dummy values avoid randomizing huge CPU lookup tables.
+             set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})
+             # The ue8m0 encoding of scale 1.0 is exponent byte 127.
+@@ -1015,6 +1109,12 @@ class ParallelEngramEmbedding(nn.Module):
+             self._weight_loader = storage.load_weight
+             return storage.weight, storage.weight_scale_inv
+         scale_dim = self.dim // self.block_size
++        if self.disk_offload:
++            # Placeholders: the rows stay in the checkpoint and are read per lookup.
++            return (
++                torch.empty(1, self.dim, dtype=torch.float8_e4m3fn, device="cpu"),
++                torch.empty(1, scale_dim, dtype=torch.uint8, device="cpu"),
++            )
+         if not self.cpu_offload:
+             return (
+                 torch.empty(
+@@ -1086,6 +1186,9 @@ class ParallelEngramEmbedding(nn.Module):
+ 
+         `background` limits the grid to leave SMs for concurrent work.
+         """
++        if self.disk_offload:
++            self._disk_lookup(indices, out, background)
++            return
+         rows = indices.shape[0] * self.part_n_hash_cols
+         if not rows:
+             return
+@@ -1133,6 +1236,91 @@ class ParallelEngramEmbedding(nn.Module):
+             SORTED=sort,
+         )
+ 
++    def init_disk_staging(self, max_rows: int) -> None:
++        """Pinned staging for disk lookups; addresses stay fixed for the run."""
++        if not self.disk_offload:
++            return
++        scale_dim = self.dim // self.block_size
++        self._disk_ids = torch.empty(
++            max_rows, dtype=torch.int64, device="cpu", pin_memory=True
++        )
++        self._disk_w = torch.empty(
++            max_rows, self.dim, dtype=torch.uint8, device="cpu", pin_memory=True
++        )
++        self._disk_s = torch.empty(
++            max_rows, scale_dim, dtype=torch.uint8, device="cpu", pin_memory=True
++        )
++        # Staging row r is output row r (token-major, local heads minor).
++        self._disk_rows = torch.arange(max_rows, dtype=torch.int64)
++        self._disk_dst = torch.arange(max_rows, dtype=torch.int32)
++        self._disk_done = torch.cuda.Event()
++
++    def _disk_lookup(
++        self, indices: torch.Tensor, out: torch.Tensor, background: bool
++    ) -> None:
++        rows = indices.shape[0] * self.part_n_hash_cols
++        if not rows:
++            return
++        assert self._disk is not None
++        assert rows <= self._disk_ids.shape[0], "engram disk staging too small"
++        stream = torch.cuda.current_stream()
++        capturing = torch.cuda.is_current_stream_capturing()
++        if self._disk_recorded and not capturing:
++            # The pinned buffers serve every lookup of this table; lookups may
++            # alternate between the inline and the prefetch stream. A captured
++            # graph needs no event: each forward joins the prefetch stream
++            # before its rows are read, and a wait on an event recorded
++            # outside the capture would invalidate it.
++            stream.wait_event(self._disk_done)
++        head_end = self.head_start + self.part_n_hash_cols
++        local = indices[:, self.head_start : head_end].to(torch.int64)
++        local = local - self.vocab_start_idx
++        if (pad := self.part_n_hash_cols - local.shape[1]) > 0:
++            local = nn.functional.pad(local, (0, pad), value=-1)
++        self._disk_ids[:rows].copy_(local.reshape(-1), non_blocking=True)
++        # Host node on this stream: after the ids copy, before the kernel below.
++        self._disk.enqueue_read(
++            stream.cuda_stream,
++            self._disk_ids.data_ptr(),
++            self._disk_w.data_ptr(),
++            self._disk_s.data_ptr(),
++            rows,
++        )
++        if self._disk_views is None:
++            self._disk_views = (
++                get_accelerator_view_from_cpu_tensor(
++                    self._disk_w.view(torch.float8_e4m3fn)
++                ),
++                get_accelerator_view_from_cpu_tensor(self._disk_s),
++            )
++        weight, scales = self._disk_views
++        tiles = triton.cdiv(rows, 16)
++        grid = min(tiles, self._num_sms // 2 if background else self._num_sms)
++        # Sorted mode over the staging rows: ids r -> output row r.
++        _engram_lookup_kernel[(grid,)](
++            weight,
++            scales,
++            self._disk_rows,
++            self._disk_dst,
++            out,
++            0,
++            rows,
++            rows,
++            1,
++            1,
++            HEAD_START=self.head_start,
++            LOCAL_HEADS=self.part_n_hash_cols,
++            TOTAL_HEADS=self.n_hash_cols,
++            DIM=self.dim,
++            QUANT_BLOCK=self.block_size,
++            BLOCK_R=16,
++            GRID=grid,
++            SORTED=True,
++        )
++        if not capturing:
++            self._disk_done.record(stream)
++            self._disk_recorded = True
++
+     def forward(self, indices: torch.Tensor) -> torch.Tensor:
+         """indices: [num_tokens, n_hash_cols] -> [num_tokens, n_hash_cols, dim]
+         bf16, gathered from all shards for this replica's tokens."""
+@@ -1379,6 +1567,11 @@ class Engram(nn.Module):
+     ) -> ParallelEngramEmbedding:
+         engram_config = get_current_vllm_config().engram_config
+         assert engram_config is not None
++        disk_source = None
++        if engram_config.disk_offload:
++            disk_source = _resolve_engram_disk_source(
++                layout.layer_ids[layer_hash_index]
++            )
+         return ParallelEngramEmbedding(
+             layout.num_embeddings[layer_hash_index],
+             layout.head_dim,
+@@ -1386,6 +1579,9 @@ class Engram(nn.Module):
+             cpu_offload=engram_config.cpu_offload,
+             dp_shared_memory=bool(engram_config.dp_shared_memory),
+             use_thp=engram_config.use_thp,
++            disk_source=disk_source,
++            disk_threads=engram_config.disk_threads,
++            disk_cache_rows=engram_config.disk_cache_rows,
+         )
+ 
+     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
+@@ -1396,6 +1592,9 @@ class Engram(nn.Module):
+             head_dim,
+             dtype=torch.bfloat16,
+         )
++        self.embed_tokens.init_disk_staging(
++            max_tokens * self.embed_tokens.dp_size * self.embed_tokens.part_n_hash_cols
++        )
+         if not self.embed_tokens.cpu_offload:
+             self._prefetch_stream = None
+             return
+diff --git a/vllm/models/deepseek_v41/common/engram_disk.cpp b/vllm/models/deepseek_v41/common/engram_disk.cpp
+new file mode 100644
+index 0000000..7e6a12b
+--- /dev/null
++++ b/vllm/models/deepseek_v41/common/engram_disk.cpp
+@@ -0,0 +1,192 @@
++// engram_disk: disk-backed Engram table reads for vLLM on unified-memory boxes (DGX Spark / GB10), where the
++// ~100 GB of pinned host Engram rows per rank that upstream keeps cannot fit next to the model.
++//
++// The table stays in the checkpoint's safetensors shards. Each lookup step:
++//   1. the caller copies this step's local row ids (int64, relative to the rank's first row) into a pinned buffer,
++//   2. `enqueue_read` launches a host function on the CUDA stream (cudaLaunchHostFunc, so it is captured into CUDA
++//      graphs as a host node) that fills pinned staging rows (FP8 weight rows + ue8m0 scale rows) from a hot-row
++//      cache or from disk with a persistent thread pool of preads,
++//   3. the caller runs a device kernel over the staging rows (vLLM reuses its own Engram lookup kernel).
++// Host functions must not call CUDA APIs; this one only reads pinned memory and files.
++#include <torch/extension.h>
++#include <cuda_runtime.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <atomic>
++#include <condition_variable>
++#include <cstring>
++#include <functional>
++#include <map>
++#include <memory>
++#include <tuple>
++#include <mutex>
++#include <stdexcept>
++#include <string>
++#include <thread>
++#include <vector>
++
++namespace {
++
++struct Pool {
++  std::vector<std::thread> threads;
++  std::mutex mu;
++  std::condition_variable cv, done_cv;
++  std::function<void(int64_t)> task;
++  std::atomic<int64_t> next{0};
++  int64_t total = 0, finished = 0;
++  uint64_t generation = 0;
++  bool stop = false;
++
++  explicit Pool(int n) {
++    for (int i = 0; i < n; i++) threads.emplace_back([this] { loop(); });
++  }
++  ~Pool() {
++    { std::lock_guard<std::mutex> g(mu); stop = true; }
++    cv.notify_all();
++    for (auto& t : threads) t.join();
++  }
++  void loop() {
++    uint64_t seen = 0;
++    for (;;) {
++      std::unique_lock<std::mutex> l(mu);
++      cv.wait(l, [&] { return stop || generation != seen; });
++      if (stop) return;
++      seen = generation;
++      l.unlock();
++      int64_t did = 0;
++      for (int64_t i; (i = next.fetch_add(1)) < total;) { task(i); did++; }
++      l.lock();
++      finished += did;
++      if (finished >= total) done_cv.notify_all();
++    }
++  }
++  void run(int64_t n, std::function<void(int64_t)> f) {
++    if (n <= 0) return;
++    std::unique_lock<std::mutex> l(mu);
++    task = std::move(f); total = n; finished = 0; next = 0; generation++;
++    cv.notify_all();
++    done_cv.wait(l, [&] { return finished >= total; });
++  }
++};
++
++}  // namespace
++
++class EngramDiskTable {
++ public:
++  // weight/scale rows live at file offsets off_w + row * row_bytes and off_s + row * scale_bytes, where row is the
++  // table-global row; rows [row_start, row_start + num_rows) belong to this rank.
++  EngramDiskTable(const std::string& weight_file, int64_t off_w, const std::string& scale_file, int64_t off_s,
++                  int64_t row_start, int64_t num_rows, int64_t row_bytes, int64_t scale_bytes, int64_t cache_rows,
++                  int threads)
++      : off_w_(off_w), off_s_(off_s), row_start_(row_start), num_rows_(num_rows), row_bytes_(row_bytes),
++        scale_bytes_(scale_bytes), pool_(threads) {
++    fd_w_ = ::open(weight_file.c_str(), O_RDONLY | O_CLOEXEC);
++    fd_s_ = scale_file == weight_file ? fd_w_ : ::open(scale_file.c_str(), O_RDONLY | O_CLOEXEC);
++    if (fd_w_ < 0 || fd_s_ < 0) throw std::runtime_error("engram_disk: cannot open " + weight_file + " / " + scale_file);
++    posix_fadvise(fd_w_, 0, 0, POSIX_FADV_RANDOM);
++    if (fd_s_ != fd_w_) posix_fadvise(fd_s_, 0, 0, POSIX_FADV_RANDOM);
++    // direct-mapped hot cache: slot = row % cache_rows; tag -1 = empty
++    cache_rows_ = cache_rows > 0 ? cache_rows : 0;
++    if (cache_rows_) {
++      tags_.assign(cache_rows_, -1);
++      cache_w_.resize(cache_rows_ * row_bytes_);
++      cache_s_.resize(cache_rows_ * scale_bytes_);
++    }
++  }
++  ~EngramDiskTable() {
++    if (fd_s_ >= 0 && fd_s_ != fd_w_) ::close(fd_s_);
++    if (fd_w_ >= 0) ::close(fd_w_);
++  }
++
++  // ids: pinned int64 [n] local rows (-1 = skip, row left zero); staging_w: pinned uint8 [n, row_bytes];
++  // staging_s: pinned uint8 [n, scale_bytes]. Synchronous; also used by the host function.
++  void read_rows(int64_t ids_ptr, int64_t w_ptr, int64_t s_ptr, int64_t n) {
++    std::lock_guard<std::mutex> run_guard(run_mu_);  // one pool.run at a time (host node vs a direct call)
++    const int64_t* ids = reinterpret_cast<const int64_t*>(ids_ptr);
++    uint8_t* w = reinterpret_cast<uint8_t*>(w_ptr);
++    uint8_t* s = reinterpret_cast<uint8_t*>(s_ptr);
++    pool_.run(n, [&](int64_t i) {
++      int64_t local = ids[i];
++      uint8_t* dw = w + i * row_bytes_;
++      uint8_t* ds = s + i * scale_bytes_;
++      if (local < 0 || local >= num_rows_) { std::memset(dw, 0, row_bytes_); std::memset(ds, 0, scale_bytes_); return; }
++      if (cache_rows_) {
++        int64_t slot = local % cache_rows_;
++        if (__atomic_load_n(&tags_[slot], __ATOMIC_ACQUIRE) == local) {
++          std::memcpy(dw, &cache_w_[slot * row_bytes_], row_bytes_);
++          std::memcpy(ds, &cache_s_[slot * scale_bytes_], scale_bytes_);
++          // a concurrent refill of this slot could have raced; re-check the tag after the copy
++          if (__atomic_load_n(&tags_[slot], __ATOMIC_ACQUIRE) == local) { hits_.fetch_add(1); return; }
++        }
++      }
++      const int64_t row = row_start_ + local;
++      pread_full(fd_w_, dw, row_bytes_, off_w_ + row * row_bytes_);
++      pread_full(fd_s_, ds, scale_bytes_, off_s_ + row * scale_bytes_);
++      misses_.fetch_add(1);
++      if (cache_rows_) {
++        int64_t slot = local % cache_rows_;
++        __atomic_store_n(&tags_[slot], (int64_t)-2, __ATOMIC_RELEASE);  // invalidate while writing
++        std::memcpy(&cache_w_[slot * row_bytes_], dw, row_bytes_);
++        std::memcpy(&cache_s_[slot * scale_bytes_], ds, scale_bytes_);
++        __atomic_store_n(&tags_[slot], local, __ATOMIC_RELEASE);
++      }
++    });
++  }
++
++  // Launch the read as a host node on `stream`: it runs after every prior op on the stream (e.g. the D2H copy of
++  // the ids) and before every later one (the device kernel over the staging rows). The buffers and n are fixed at
++  // launch, so a captured graph replays the same buffers; the caller fills ids_ptr before each replay.
++  void enqueue_read(int64_t stream, int64_t ids_ptr, int64_t w_ptr, int64_t s_ptr, int64_t n) {
++    Job* job;
++    {
++      // one Job per (buffers, n), owned until the table dies: graph replays keep a valid pointer, eager steps reuse it
++      std::lock_guard<std::mutex> g(jobs_mu_);
++      auto& slot = jobs_[std::make_tuple(ids_ptr, w_ptr, s_ptr, n)];
++      if (!slot) slot.reset(new Job{this, ids_ptr, w_ptr, s_ptr, n});
++      job = slot.get();
++    }
++    cudaError_t e = cudaLaunchHostFunc(reinterpret_cast<cudaStream_t>(stream), &EngramDiskTable::host_fn, job);
++    if (e != cudaSuccess) throw std::runtime_error(std::string("engram_disk: cudaLaunchHostFunc: ") + cudaGetErrorString(e));
++  }
++
++  std::vector<int64_t> stats() const { return {hits_.load(), misses_.load()}; }
++
++ private:
++  struct Job { EngramDiskTable* t; int64_t ids, w, s, n; };
++  static void CUDART_CB host_fn(void* p) {
++    auto* j = static_cast<Job*>(p);
++    j->t->read_rows(j->ids, j->w, j->s, j->n);
++  }
++  static void pread_full(int fd, uint8_t* dst, int64_t len, int64_t off) {
++    while (len > 0) {
++      ssize_t r = ::pread(fd, dst, len, off);
++      if (r <= 0) {
++        if (r < 0 && errno == EINTR) continue;
++        std::memset(dst, 0, len);  // never leave garbage; a short read past EOF reads as zeros
++        return;
++      }
++      dst += r; len -= r; off += r;
++    }
++  }
++  int fd_w_ = -1, fd_s_ = -1;
++  int64_t off_w_, off_s_, row_start_, num_rows_, row_bytes_, scale_bytes_, cache_rows_ = 0;
++  std::vector<int64_t> tags_;
++  std::vector<uint8_t> cache_w_, cache_s_;
++  std::atomic<int64_t> hits_{0}, misses_{0};
++  std::mutex jobs_mu_, run_mu_;
++  std::map<std::tuple<int64_t, int64_t, int64_t, int64_t>, std::unique_ptr<Job>> jobs_;
++  Pool pool_;
++};
++
++PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
++  pybind11::class_<EngramDiskTable>(m, "EngramDiskTable")
++      .def(pybind11::init<const std::string&, int64_t, const std::string&, int64_t, int64_t, int64_t, int64_t, int64_t,
++                          int64_t, int>(),
++           pybind11::arg("weight_file"), pybind11::arg("weight_offset"), pybind11::arg("scale_file"),
++           pybind11::arg("scale_offset"), pybind11::arg("row_start"), pybind11::arg("num_rows"),
++           pybind11::arg("row_bytes"), pybind11::arg("scale_bytes"), pybind11::arg("cache_rows") = 0,
++           pybind11::arg("threads") = 32)
++      .def("read_rows", &EngramDiskTable::read_rows, pybind11::call_guard<pybind11::gil_scoped_release>())
++      .def("enqueue_read", &EngramDiskTable::enqueue_read)
++      .def("stats", &EngramDiskTable::stats);
++}

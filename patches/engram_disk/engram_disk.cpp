@@ -1,0 +1,604 @@
+// engram_disk: disk-backed Engram table reads for vLLM on unified-memory boxes (DGX Spark / GB10), where the
+// ~100 GB of pinned host Engram rows per rank that upstream keeps cannot fit next to the model.
+//
+// The table stays in the checkpoint's safetensors shards. Each lookup step:
+//   1. the caller copies this step's local row ids (int64, relative to the rank's first row) into a pinned buffer,
+//   2. `enqueue_read` launches a host function on the CUDA stream (cudaLaunchHostFunc, so it is captured into CUDA
+//      graphs as a host node) that fills pinned staging rows (FP8 weight rows + ue8m0 scale rows) from a hot-row
+//      cache or from disk with a persistent thread pool of preads,
+//   3. the caller runs a device kernel over the staging rows (vLLM reuses its own Engram lookup kernel).
+// Host functions must not call CUDA APIs; this one only reads pinned memory and files.
+//
+// Spin mode (`enable_spin`): no host function and no thread wake-ups on the lookup path. A host node costs the CUDA
+// callback thread's wake-up, the pool's wake-up and the done wake-up, each 0.1-0.4 ms on an idle GB10 core. Instead
+// `enqueue_read` puts three stream memory operations on the stream (captured into graphs like any node): write the row
+// count to a request word in pinned memory, wait until a done word reads 1, reset it to 0. One proxy thread per
+// process, shared by every table in spin mode, spins on the request words. It serves a request from the hot-row cache,
+// reads every other row with one batch of native AIO reads (O_DIRECT into aligned bounce buffers, all in flight at
+// once; io_uring is blocked by Docker's default seccomp profile), polls their completions, and sets done. After
+// spin_ms without a request it naps 50 us at a time.
+#include <torch/extension.h>
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <linux/aio_abi.h>
+#include <sys/syscall.h>
+#include <time.h>
+#include <unistd.h>
+#include <algorithm>
+#include <atomic>
+#include <cerrno>
+#include <chrono>
+#include <condition_variable>
+#include <cstdlib>
+#include <cstring>
+#include <functional>
+#include <map>
+#include <memory>
+#include <tuple>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace {
+
+struct Pool {
+  std::vector<std::thread> threads;
+  std::mutex mu;
+  std::condition_variable cv, done_cv;
+  std::function<void(int64_t)> task;
+  std::atomic<int64_t> next{0};
+  int64_t total = 0, finished = 0;
+  uint64_t generation = 0;
+  bool stop = false;
+
+  explicit Pool(int n) {
+    for (int i = 0; i < n; i++) threads.emplace_back([this] { loop(); });
+  }
+  ~Pool() {
+    { std::lock_guard<std::mutex> g(mu); stop = true; }
+    cv.notify_all();
+    for (auto& t : threads) t.join();
+  }
+  void loop() {
+    uint64_t seen = 0;
+    for (;;) {
+      std::unique_lock<std::mutex> l(mu);
+      cv.wait(l, [&] { return stop || generation != seen; });
+      if (stop) return;
+      seen = generation;
+      l.unlock();
+      int64_t did = 0;
+      for (int64_t i; (i = next.fetch_add(1)) < total;) { task(i); did++; }
+      l.lock();
+      finished += did;
+      if (finished >= total) done_cv.notify_all();
+    }
+  }
+  void run(int64_t n, std::function<void(int64_t)> f) {
+    if (n <= 0) return;
+    std::unique_lock<std::mutex> l(mu);
+    task = std::move(f); total = n; finished = 0; next = 0; generation++;
+    cv.notify_all();
+    done_cv.wait(l, [&] { return finished >= total; });
+  }
+};
+
+// CUDA driver stream memory operations, looked up in the already loaded libcuda (no link-time dependency)
+using MemopFn = CUresult (*)(CUstream, CUdeviceptr, cuuint32_t, unsigned int);
+struct Memops {
+  MemopFn write = nullptr, wait = nullptr;
+  Memops() {
+    void* h = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (!h) return;
+    auto sym = [h](const char* a, const char* b) { void* p = dlsym(h, a); return p ? p : dlsym(h, b); };
+    write = reinterpret_cast<MemopFn>(sym("cuStreamWriteValue32_v2", "cuStreamWriteValue32"));
+    wait = reinterpret_cast<MemopFn>(sym("cuStreamWaitValue32_v2", "cuStreamWaitValue32"));
+  }
+};
+const Memops& memops() {
+  static Memops m;
+  return m;
+}
+
+inline int64_t now_ns() {
+  timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+inline void cpu_relax() {
+#if defined(__aarch64__)
+  asm volatile("isb" ::: "memory");
+#elif defined(__x86_64__)
+  __builtin_ia32_pause();
+#endif
+}
+
+void check_cuda(cudaError_t e, const char* what) {
+  if (e != cudaSuccess) throw std::runtime_error(std::string("engram_disk: ") + what + ": " + cudaGetErrorString(e));
+}
+
+}  // namespace
+
+class EngramDiskTable;
+
+// The spin-mode proxy: one thread per process, created with the first table that enables spin mode, never destroyed
+// (it may outlive static destructors at exit). Tables add themselves in enable_spin and remove themselves before
+// their memory goes away; remove waits until the thread has seen the new table list.
+class Proxy {
+ public:
+  static Proxy& get() {
+    static Proxy* p = new Proxy();
+    return *p;
+  }
+  // ka_fd: an O_DIRECT descriptor of the table's file for the keep-alive read (-1: none), ka_ns: its period
+  void add(EngramDiskTable* t, int64_t spin_ns, int ka_fd, int64_t ka_ns) {
+    std::lock_guard<std::mutex> g(mu_);
+    tables_.push_back(t);
+    if (spin_ns > spin_ns_.load()) spin_ns_.store(spin_ns);
+    if (ka_ns > 0 && ka_fd >= 0 && ka_fd_ < 0) {
+      ka_fd_ = ::dup(ka_fd);  // the proxy's own descriptor: tables close theirs
+      ka_ns_.store(ka_ns);
+    }
+    version_.fetch_add(1, std::memory_order_acq_rel);
+    if (!started_) {
+      started_ = true;
+      std::thread([this] { loop(); }).detach();
+    }
+    cv_.notify_all();
+  }
+  void remove(EngramDiskTable* t) {
+    uint64_t v;
+    {
+      std::lock_guard<std::mutex> g(mu_);
+      tables_.erase(std::remove(tables_.begin(), tables_.end(), t), tables_.end());
+      v = version_.fetch_add(1, std::memory_order_acq_rel) + 1;
+      cv_.notify_all();
+    }
+    while (acked_.load(std::memory_order_acquire) < v) std::this_thread::sleep_for(std::chrono::microseconds(20));
+  }
+
+ private:
+  void loop();
+  void keepalive(int64_t now);
+  std::mutex mu_;
+  std::condition_variable cv_;
+  std::vector<EngramDiskTable*> tables_;
+  std::atomic<uint64_t> version_{0}, acked_{0};
+  std::atomic<int64_t> spin_ns_{0}, ka_ns_{0};
+  bool started_ = false;
+  // NVMe keep-alive: while the proxy spins, one 4 KiB O_DIRECT read whenever ka_ns_ passes without a disk read. A
+  // drive left idle between decode steps drops to a low-power state and its next reads take +200-400 us (spark2's
+  // Samsung PM9C1a: a 96-read lookup 278 us with a read every 2 ms, 667 us with 50 ms idle). It stops with the spin.
+  int ka_fd_ = -1;
+  aio_context_t ka_ctx_ = 0;
+  void* ka_buf_ = nullptr;
+  iocb ka_cb_{};
+  bool ka_inflight_ = false;
+  int64_t last_io_ = 0;
+};
+
+class EngramDiskTable {
+ public:
+  // weight/scale rows live at file offsets off_w + row * row_bytes and off_s + row * scale_bytes, where row is the
+  // table-global row; rows [row_start, row_start + num_rows) belong to this rank.
+  EngramDiskTable(const std::string& weight_file, int64_t off_w, const std::string& scale_file, int64_t off_s,
+                  int64_t row_start, int64_t num_rows, int64_t row_bytes, int64_t scale_bytes, int64_t cache_rows,
+                  int threads)
+      : weight_file_(weight_file), scale_file_(scale_file), off_w_(off_w), off_s_(off_s), row_start_(row_start),
+        num_rows_(num_rows), row_bytes_(row_bytes), scale_bytes_(scale_bytes), pool_(threads) {
+    fd_w_ = ::open(weight_file.c_str(), O_RDONLY | O_CLOEXEC);
+    fd_s_ = scale_file == weight_file ? fd_w_ : ::open(scale_file.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd_w_ < 0 || fd_s_ < 0) throw std::runtime_error("engram_disk: cannot open " + weight_file + " / " + scale_file);
+    posix_fadvise(fd_w_, 0, 0, POSIX_FADV_RANDOM);
+    if (fd_s_ != fd_w_) posix_fadvise(fd_s_, 0, 0, POSIX_FADV_RANDOM);
+    // direct-mapped hot cache: slot = row % cache_rows; tag -1 = empty
+    cache_rows_ = cache_rows > 0 ? cache_rows : 0;
+    if (cache_rows_) {
+      tags_.assign(cache_rows_, -1);
+      cache_w_.resize(cache_rows_ * row_bytes_);
+      cache_s_.resize(cache_rows_ * scale_bytes_);
+    }
+  }
+  ~EngramDiskTable() {
+    if (spin_) {
+      Proxy::get().remove(this);
+      if (aio_) syscall(SYS_io_destroy, aio_);
+      if (fd_sd_ >= 0 && fd_sd_ != fd_wd_) ::close(fd_sd_);
+      if (fd_wd_ >= 0) ::close(fd_wd_);
+      std::free(bounce_);
+      if (cudaHostUnregister(ctl_) != cudaSuccess) cudaGetLastError();  // e.g. at exit: leave no error for the caller
+      std::free(ctl_);
+    }
+    if (fd_s_ >= 0 && fd_s_ != fd_w_) ::close(fd_s_);
+    if (fd_w_ >= 0) ::close(fd_w_);
+  }
+
+  // ids: pinned int64 [n] local rows (-1 = skip, row left zero); staging_w: pinned uint8 [n, row_bytes];
+  // staging_s: pinned uint8 [n, scale_bytes]. Synchronous; also used by the host function.
+  void read_rows(int64_t ids_ptr, int64_t w_ptr, int64_t s_ptr, int64_t n) {
+    std::lock_guard<std::mutex> run_guard(run_mu_);  // one pool.run at a time (host node vs a direct call)
+    const int64_t* ids = reinterpret_cast<const int64_t*>(ids_ptr);
+    uint8_t* w = reinterpret_cast<uint8_t*>(w_ptr);
+    uint8_t* s = reinterpret_cast<uint8_t*>(s_ptr);
+    pool_.run(n, [&](int64_t i) {
+      int64_t local = ids[i];
+      uint8_t* dw = w + i * row_bytes_;
+      uint8_t* ds = s + i * scale_bytes_;
+      if (local < 0 || local >= num_rows_) { std::memset(dw, 0, row_bytes_); std::memset(ds, 0, scale_bytes_); return; }
+      if (cache_get(local, dw, ds)) { hits_.fetch_add(1); return; }
+      const int64_t row = row_start_ + local;
+      pread_full(fd_w_, dw, row_bytes_, off_w_ + row * row_bytes_);
+      pread_full(fd_s_, ds, scale_bytes_, off_s_ + row * scale_bytes_);
+      misses_.fetch_add(1);
+      cache_put(local, dw, ds);
+    });
+  }
+
+  // Launch the read on `stream`: it runs after every prior op on the stream (e.g. the D2H copy of the ids) and
+  // before every later one (the device kernel over the staging rows). The buffers and n are fixed at launch, so a
+  // captured graph replays the same buffers; the caller fills ids_ptr before each replay. Host node, or in spin mode
+  // the three memory operations the proxy answers (spin mode keeps one set of buffers per table).
+  void enqueue_read(int64_t stream, int64_t ids_ptr, int64_t w_ptr, int64_t s_ptr, int64_t n) {
+    if (spin_) {
+      if (n <= 0) return;
+      if (n > INT32_MAX) throw std::runtime_error("engram_disk: too many rows for one spin-mode request");
+      {
+        std::lock_guard<std::mutex> g(jobs_mu_);
+        if (!sp_ids_.load()) {
+          sp_ids_.store(reinterpret_cast<const int64_t*>(ids_ptr));
+          sp_w_.store(reinterpret_cast<uint8_t*>(w_ptr));
+          sp_s_.store(reinterpret_cast<uint8_t*>(s_ptr));
+        } else if (sp_ids_.load() != reinterpret_cast<const int64_t*>(ids_ptr) ||
+                   sp_w_.load() != reinterpret_cast<uint8_t*>(w_ptr) || sp_s_.load() != reinterpret_cast<uint8_t*>(s_ptr)) {
+          throw std::runtime_error("engram_disk: spin mode serves one set of staging buffers per table");
+        }
+        if (n > sp_max_.load()) sp_max_.store(n);
+      }
+      CUstream st = reinterpret_cast<CUstream>(stream);
+      const Memops& m = memops();
+      CUresult r = m.write(st, req_dev_, static_cast<cuuint32_t>(n), CU_STREAM_WRITE_VALUE_DEFAULT);
+      if (r == CUDA_SUCCESS) r = m.wait(st, done_dev_, 1, CU_STREAM_WAIT_VALUE_EQ);
+      if (r == CUDA_SUCCESS) r = m.write(st, done_dev_, 0, CU_STREAM_WRITE_VALUE_DEFAULT);
+      if (r != CUDA_SUCCESS) throw std::runtime_error("engram_disk: stream memory operation failed: " + std::to_string(r));
+      return;
+    }
+    Job* job;
+    {
+      // one Job per (buffers, n), owned until the table dies: graph replays keep a valid pointer, eager steps reuse it
+      std::lock_guard<std::mutex> g(jobs_mu_);
+      auto& slot = jobs_[std::make_tuple(ids_ptr, w_ptr, s_ptr, n)];
+      if (!slot) slot.reset(new Job{this, ids_ptr, w_ptr, s_ptr, n});
+      job = slot.get();
+    }
+    cudaError_t e = cudaLaunchHostFunc(reinterpret_cast<cudaStream_t>(stream), &EngramDiskTable::host_fn, job);
+    if (e != cudaSuccess) throw std::runtime_error(std::string("engram_disk: cudaLaunchHostFunc: ") + cudaGetErrorString(e));
+  }
+
+  // Spin mode for every later enqueue_read. spin_ms: how long the proxy keeps spinning after a request before it
+  // naps; queue_depth: AIO reads in flight at once (and bounce buffers); keepalive_us: the NVMe keep-alive period
+  // (0 = off); pool_rows: requests above this many rows (prefill chunks) go to the pread pool, whose many threads
+  // read big batches faster than one thread submitting. Returns how rows are read.
+  std::string enable_spin(int64_t spin_ms, int64_t queue_depth, int64_t keepalive_us, int64_t pool_rows) {
+    if (spin_) return mode();
+    if (!memops().write || !memops().wait) throw std::runtime_error("engram_disk: libcuda has no stream memory operations");
+    // registered malloc memory, not cudaHostAlloc: GB10 reaches cudaHostAlloc memory over an uncached path, ~3x slower
+    // (TensorFold moved its RDMA flags for this, bd0024d)
+    void* p = nullptr;
+    if (posix_memalign(&p, 4096, 4096) != 0) throw std::runtime_error("engram_disk: posix_memalign");
+    std::memset(p, 0, 4096);
+    check_cuda(cudaHostRegister(p, 4096, cudaHostRegisterMapped | cudaHostRegisterPortable), "cudaHostRegister");
+    ctl_ = static_cast<int32_t*>(p);
+    void* d = nullptr;
+    check_cuda(cudaHostGetDevicePointer(&d, p, 0), "cudaHostGetDevicePointer");
+    req_dev_ = reinterpret_cast<CUdeviceptr>(d);
+    done_dev_ = req_dev_ + kDone * sizeof(int32_t);
+    qd_ = static_cast<int>(std::max<int64_t>(1, std::min<int64_t>(queue_depth, 4096)));
+    // O_DIRECT descriptors for the batch reads; buffered preads in the proxy if the file system refuses them
+    fd_wd_ = ::open(weight_file_.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECT);
+    fd_sd_ = scale_file_ == weight_file_ ? fd_wd_ : ::open(scale_file_.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECT);
+    slot_bytes_ = ((std::max(row_bytes_, scale_bytes_) + kAlign - 1) / kAlign + 1) * kAlign;
+    if (fd_wd_ >= 0 && fd_sd_ >= 0 && syscall(SYS_io_setup, qd_, &aio_) == 0 &&
+        posix_memalign(reinterpret_cast<void**>(&bounce_), kAlign, qd_ * slot_bytes_) == 0) {
+      direct_ = true;
+      iocbs_.resize(qd_);
+      iocbp_.resize(qd_);
+      slot_piece_.resize(qd_);
+      for (int i = qd_ - 1; i >= 0; i--) free_.push_back(i);
+    } else {
+      if (aio_) { syscall(SYS_io_destroy, aio_); aio_ = 0; }
+      if (fd_sd_ >= 0 && fd_sd_ != fd_wd_) ::close(fd_sd_);
+      if (fd_wd_ >= 0) ::close(fd_wd_);
+      fd_wd_ = fd_sd_ = -1;
+    }
+    pool_rows_ = pool_rows;
+    spin_ = true;
+    Proxy::get().add(this, spin_ms * 1000000LL, direct_ ? fd_wd_ : -1, keepalive_us * 1000LL);
+    return mode();
+  }
+
+  // Serve one request now in the calling thread, as the proxy would (spin mode's read path without the GPU; for
+  // benchmarks). Not concurrent with a spin-mode lookup on the same table.
+  void serve_rows(int64_t ids_ptr, int64_t w_ptr, int64_t s_ptr, int64_t n) {
+    if (!spin_) throw std::runtime_error("engram_disk: serve_rows needs spin mode");
+    serve(reinterpret_cast<const int64_t*>(ids_ptr), reinterpret_cast<uint8_t*>(w_ptr),
+          reinterpret_cast<uint8_t*>(s_ptr), n);
+  }
+
+  // Called by the proxy thread: a pending request is served and answered; false if there was none.
+  bool poll() {
+    const int32_t n = __atomic_load_n(&ctl_[0], __ATOMIC_ACQUIRE);
+    if (n == 0) return false;
+    __atomic_store_n(&ctl_[0], 0, __ATOMIC_RELAXED);
+    const int64_t t0 = now_ns();
+    try {
+      const int64_t* ids = sp_ids_.load(std::memory_order_acquire);
+      const int64_t rows = std::min<int64_t>(n, sp_max_.load(std::memory_order_acquire));
+      uint8_t* w = sp_w_.load(std::memory_order_acquire);
+      uint8_t* sc = sp_s_.load(std::memory_order_acquire);
+      if (ids && pool_rows_ > 0 && rows > pool_rows_) {
+        read_rows(reinterpret_cast<int64_t>(ids), reinterpret_cast<int64_t>(w), reinterpret_cast<int64_t>(sc), rows);
+      } else if (ids) {
+        serve(ids, w, sc, rows);
+      }
+    } catch (...) {
+      errors_.fetch_add(1);  // rows read so far stay; the lookup must not hang on a failed read
+    }
+    const int64_t dt = now_ns() - t0;
+    served_.fetch_add(1);
+    serve_ns_.fetch_add(dt);
+    if (dt > serve_max_ns_.load()) serve_max_ns_.store(dt);
+    __atomic_store_n(&ctl_[kDone], 1, __ATOMIC_RELEASE);
+    return true;
+  }
+
+  std::vector<int64_t> stats() const { return {hits_.load(), misses_.load()}; }
+  // spin mode: requests served, total and max serve time (ns), failed serves
+  std::vector<int64_t> spin_stats() const {
+    return {served_.load(), serve_ns_.load(), serve_max_ns_.load(), errors_.load()};
+  }
+  std::string mode() const {
+    if (!spin_) return "host node + " + std::to_string(pool_.threads.size()) + " pread threads";
+    return (direct_ ? "spin proxy + native AIO, O_DIRECT, " + std::to_string(qd_) + " in flight"
+                    : std::string("spin proxy + buffered preads (no O_DIRECT here)")) +
+           (pool_rows_ > 0 ? ", requests over " + std::to_string(pool_rows_) + " rows to the " +
+                                 std::to_string(pool_.threads.size()) + "-thread pool"
+                           : std::string());
+  }
+
+ private:
+  struct Job { EngramDiskTable* t; int64_t ids, w, s, n; };
+  static constexpr int kDone = 32;        // ctl_ word of the done flag (its own 128 B line, apart from the request)
+  static constexpr int64_t kAlign = 4096; // O_DIRECT offset / length / memory alignment, any logical block size
+  static void CUDART_CB host_fn(void* p) {
+    auto* j = static_cast<Job*>(p);
+    j->t->read_rows(j->ids, j->w, j->s, j->n);
+  }
+  static void pread_full(int fd, uint8_t* dst, int64_t len, int64_t off) {
+    while (len > 0) {
+      ssize_t r = ::pread(fd, dst, len, off);
+      if (r <= 0) {
+        if (r < 0 && errno == EINTR) continue;
+        std::memset(dst, 0, len);  // never leave garbage; a short read past EOF reads as zeros
+        return;
+      }
+      dst += r; len -= r; off += r;
+    }
+  }
+  bool cache_get(int64_t local, uint8_t* dw, uint8_t* ds) {
+    if (!cache_rows_) return false;
+    int64_t slot = local % cache_rows_;
+    if (__atomic_load_n(&tags_[slot], __ATOMIC_ACQUIRE) != local) return false;
+    std::memcpy(dw, &cache_w_[slot * row_bytes_], row_bytes_);
+    std::memcpy(ds, &cache_s_[slot * scale_bytes_], scale_bytes_);
+    // a concurrent refill of this slot could have raced; re-check the tag after the copy
+    return __atomic_load_n(&tags_[slot], __ATOMIC_ACQUIRE) == local;
+  }
+  void cache_put(int64_t local, const uint8_t* dw, const uint8_t* ds) {
+    if (!cache_rows_) return;
+    int64_t slot = local % cache_rows_;
+    __atomic_store_n(&tags_[slot], (int64_t)-2, __ATOMIC_RELEASE);  // invalidate while writing
+    std::memcpy(&cache_w_[slot * row_bytes_], dw, row_bytes_);
+    std::memcpy(&cache_s_[slot * scale_bytes_], ds, scale_bytes_);
+    __atomic_store_n(&tags_[slot], local, __ATOMIC_RELEASE);
+  }
+
+  // Spin-mode read of n rows into staging: cache hits copied, every other row's weight and scale read with AIO.
+  void serve(const int64_t* ids, uint8_t* w, uint8_t* s, int64_t n) {
+    pend_.clear();
+    for (int64_t i = 0; i < n; i++) {
+      const int64_t local = ids[i];
+      uint8_t* dw = w + i * row_bytes_;
+      uint8_t* ds = s + i * scale_bytes_;
+      if (local < 0 || local >= num_rows_) { std::memset(dw, 0, row_bytes_); std::memset(ds, 0, scale_bytes_); continue; }
+      if (cache_get(local, dw, ds)) { hits_.fetch_add(1); continue; }
+      pend_.push_back(i);
+    }
+    if (pend_.empty()) return;
+    if (direct_) {
+      read_direct(ids, w, s);
+    } else {
+      for (int64_t i : pend_) {
+        const int64_t row = row_start_ + ids[i];
+        pread_full(fd_w_, w + i * row_bytes_, row_bytes_, off_w_ + row * row_bytes_);
+        pread_full(fd_s_, s + i * scale_bytes_, scale_bytes_, off_s_ + row * scale_bytes_);
+      }
+    }
+    misses_.fetch_add(static_cast<int64_t>(pend_.size()));
+    for (int64_t i : pend_) cache_put(ids[i], w + i * row_bytes_, s + i * scale_bytes_);
+  }
+
+  struct Piece { int fd, fd_buffered; int64_t off, len; uint8_t* dst; };
+  Piece piece(const int64_t* ids, uint8_t* w, uint8_t* s, int64_t j) const {  // piece 2k: row k's weight, 2k+1: scale
+    const int64_t i = pend_[j >> 1];
+    const int64_t row = row_start_ + ids[i];
+    if (!(j & 1)) return {fd_wd_, fd_w_, off_w_ + row * row_bytes_, row_bytes_, w + i * row_bytes_};
+    return {fd_sd_, fd_s_, off_s_ + row * scale_bytes_, scale_bytes_, s + i * scale_bytes_};
+  }
+  void read_direct(const int64_t* ids, uint8_t* w, uint8_t* s) {
+    const int64_t total = 2 * static_cast<int64_t>(pend_.size());
+    int64_t next = 0, done = 0, inflight = 0;
+    io_event ev[64];
+    timespec zero{0, 0};
+    while (done < total) {
+      int k = 0;
+      while (next < total && !free_.empty()) {
+        const Piece p = piece(ids, w, s, next);
+        const int slot = free_.back();
+        free_.pop_back();
+        const int64_t a = p.off & ~(kAlign - 1);
+        const int64_t e = (p.off + p.len + kAlign - 1) & ~(kAlign - 1);
+        iocb& cb = iocbs_[slot];
+        std::memset(&cb, 0, sizeof(cb));
+        cb.aio_lio_opcode = IOCB_CMD_PREAD;
+        cb.aio_fildes = static_cast<uint32_t>(p.fd);
+        cb.aio_buf = reinterpret_cast<uint64_t>(bounce_ + slot * slot_bytes_);
+        cb.aio_nbytes = static_cast<uint64_t>(e - a);
+        cb.aio_offset = a;
+        cb.aio_data = static_cast<uint64_t>(slot);
+        slot_piece_[slot] = next++;
+        iocbp_[k++] = &cb;
+      }
+      if (k) {
+        long r = syscall(SYS_io_submit, aio_, k, iocbp_.data());
+        if (r < 0) {
+          if (errno == EINVAL) direct_fail_.fetch_add(65);  // O_DIRECT reads refused here: buffered from now on
+          r = 0;
+        }
+        for (int j = static_cast<int>(r); j < k; j++) free_.push_back(static_cast<int>(iocbp_[j]->aio_data));
+        next -= k - r;  // the unsubmitted tail goes again next round (pieces were taken in order)
+        inflight += r;
+        if (inflight == 0) {  // nothing can be submitted at all: read the rest with buffered preads
+          for (; next < total; next++, done++) {
+            const Piece p = piece(ids, w, s, next);
+            pread_full(p.fd_buffered, p.dst, p.len, p.off);
+          }
+          break;
+        }
+      }
+      const long got = syscall(SYS_io_getevents, aio_, 0L, 64L, ev, &zero);
+      for (long q = 0; q < got; q++) {
+        const int slot = static_cast<int>(ev[q].data);
+        const Piece p = piece(ids, w, s, slot_piece_[slot]);
+        const int64_t delta = p.off - (p.off & ~(kAlign - 1));
+        if (ev[q].res >= delta + p.len) {
+          std::memcpy(p.dst, bounce_ + slot * slot_bytes_ + delta, p.len);
+        } else {
+          if (ev[q].res == -EINVAL) direct_fail_.fetch_add(1);
+          pread_full(p.fd_buffered, p.dst, p.len, p.off);  // error or short read: this piece the buffered way
+        }
+        free_.push_back(slot);
+        inflight--;
+        done++;
+      }
+      if (got <= 0) cpu_relax();
+    }
+    if (direct_fail_.load() > 64) direct_ = false;  // the file system takes O_DIRECT opens but not these reads
+  }
+
+  std::string weight_file_, scale_file_;
+  int fd_w_ = -1, fd_s_ = -1;
+  int64_t off_w_, off_s_, row_start_, num_rows_, row_bytes_, scale_bytes_, cache_rows_ = 0;
+  std::vector<int64_t> tags_;
+  std::vector<uint8_t> cache_w_, cache_s_;
+  std::atomic<int64_t> hits_{0}, misses_{0};
+  std::mutex jobs_mu_, run_mu_;
+  std::map<std::tuple<int64_t, int64_t, int64_t, int64_t>, std::unique_ptr<Job>> jobs_;
+  Pool pool_;
+  // spin mode
+  bool spin_ = false;
+  std::atomic<bool> direct_{false};
+  int64_t pool_rows_ = 0;
+  int32_t* ctl_ = nullptr;  // registered: [0] request (row count, 0 = none), [kDone] done flag
+  CUdeviceptr req_dev_ = 0, done_dev_ = 0;
+  std::atomic<const int64_t*> sp_ids_{nullptr};
+  std::atomic<uint8_t*> sp_w_{nullptr}, sp_s_{nullptr};
+  std::atomic<int64_t> sp_max_{0};
+  int fd_wd_ = -1, fd_sd_ = -1, qd_ = 0;
+  aio_context_t aio_ = 0;
+  int64_t slot_bytes_ = 0;
+  uint8_t* bounce_ = nullptr;
+  std::vector<iocb> iocbs_;
+  std::vector<iocb*> iocbp_;
+  std::vector<int64_t> slot_piece_, pend_;
+  std::vector<int> free_;
+  std::atomic<int64_t> served_{0}, serve_ns_{0}, serve_max_ns_{0}, errors_{0}, direct_fail_{0};
+};
+
+void Proxy::loop() {
+  std::vector<EngramDiskTable*> local;
+  uint64_t seen = 0;
+  int64_t last = now_ns();
+  for (;;) {
+    if (version_.load(std::memory_order_acquire) != seen) {
+      std::unique_lock<std::mutex> l(mu_);
+      local = tables_;
+      seen = version_.load(std::memory_order_acquire);
+      acked_.store(seen, std::memory_order_release);
+      if (local.empty()) {  // no table in spin mode: sleep until one is added
+        cv_.wait(l, [&] { return version_.load(std::memory_order_acquire) != seen; });
+        continue;
+      }
+      last = now_ns();
+    }
+    bool busy = false;
+    for (EngramDiskTable* t : local) busy |= t->poll();
+    const int64_t now = now_ns();
+    if (busy) {
+      last = last_io_ = now;
+    } else if (now - last > spin_ns_.load(std::memory_order_relaxed)) {
+      timespec ts{0, 50000};
+      nanosleep(&ts, nullptr);
+    } else {
+      if (ka_fd_ >= 0) keepalive(now);
+      cpu_relax();
+    }
+  }
+}
+
+void Proxy::keepalive(int64_t now) {
+  if (!ka_ctx_) {
+    if (syscall(SYS_io_setup, 4, &ka_ctx_) != 0 || posix_memalign(&ka_buf_, 4096, 4096) != 0) {
+      ka_fd_ = -1;  // no keep-alive here; reads still work
+      return;
+    }
+  }
+  if (ka_inflight_) {
+    io_event ev;
+    timespec zero{0, 0};
+    if (syscall(SYS_io_getevents, ka_ctx_, 0L, 1L, &ev, &zero) == 1) ka_inflight_ = false;
+    return;
+  }
+  if (now - last_io_ < ka_ns_.load(std::memory_order_relaxed)) return;
+  std::memset(&ka_cb_, 0, sizeof(ka_cb_));
+  ka_cb_.aio_lio_opcode = IOCB_CMD_PREAD;
+  ka_cb_.aio_fildes = static_cast<uint32_t>(ka_fd_);
+  ka_cb_.aio_buf = reinterpret_cast<uint64_t>(ka_buf_);
+  ka_cb_.aio_nbytes = 4096;
+  ka_cb_.aio_offset = 0;  // the shard's header block
+  iocb* cbp = &ka_cb_;
+  if (syscall(SYS_io_submit, ka_ctx_, 1L, &cbp) == 1) ka_inflight_ = true;
+  last_io_ = now;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  pybind11::class_<EngramDiskTable>(m, "EngramDiskTable")
+      .def(pybind11::init<const std::string&, int64_t, const std::string&, int64_t, int64_t, int64_t, int64_t, int64_t,
+                          int64_t, int>(),
+           pybind11::arg("weight_file"), pybind11::arg("weight_offset"), pybind11::arg("scale_file"),
+           pybind11::arg("scale_offset"), pybind11::arg("row_start"), pybind11::arg("num_rows"),
+           pybind11::arg("row_bytes"), pybind11::arg("scale_bytes"), pybind11::arg("cache_rows") = 0,
+           pybind11::arg("threads") = 32)
+      .def("read_rows", &EngramDiskTable::read_rows, pybind11::call_guard<pybind11::gil_scoped_release>())
+      .def("enqueue_read", &EngramDiskTable::enqueue_read)
+      .def("enable_spin", &EngramDiskTable::enable_spin, pybind11::arg("spin_ms") = 1000,
+           pybind11::arg("queue_depth") = 256, pybind11::arg("keepalive_us") = 2000, pybind11::arg("pool_rows") = 512)
+      .def("serve_rows", &EngramDiskTable::serve_rows, pybind11::call_guard<pybind11::gil_scoped_release>())
+      .def("stats", &EngramDiskTable::stats)
+      .def("spin_stats", &EngramDiskTable::spin_stats)
+      .def("mode", &EngramDiskTable::mode);
+}

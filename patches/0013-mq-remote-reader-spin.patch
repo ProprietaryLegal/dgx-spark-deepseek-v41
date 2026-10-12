@@ -1,0 +1,61 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 (touches no file of patches 0001-0012).
+A remote MessageQueue reader busy-polls before sleeping (VLLM_MQ_REMOTE_SPIN_MS, e.g. 200; 0 = off, the default). With
+tensor parallelism across nodes (--nnodes 2, the headless rank on the second Spark), each step's scheduler output
+reaches the remote worker over a ZMQ socket, and MessageQueue.recv sleeps in zmq's poll until it arrives, while the
+head node's local worker spins on shared memory. A thread woken from an idle GB10 core starts ~0.4 ms late
+(TensorFold measured 433 us, and cut its follower's first-gather wait from 440 to 26 us by busy polling: github.com/
+bertholomus/TensorFold, branch deepseek-v41-tp2, 8ec371c / 7e2bc6f), and every rank then waits for the late one at
+the step's first all-reduce: in our k=3 profile the embedding's all-reduce absorbed a 272 / 341 us start skew twice a
+step (LOG Oct 10 21:28, scripts/bench/trace_gaps.py). With the knob set, the remote reader polls without sleeping for
+that many milliseconds after each message, then falls back to the blocking poll with the same timeout, so decode steps
+(tens of ms apart) never sleep and an idle server does not burn a core.
+
+diff --git a/vllm/distributed/device_communicators/shm_broadcast.py b/vllm/distributed/device_communicators/shm_broadcast.py
+index bafc572..07736bc 100644
+--- a/vllm/distributed/device_communicators/shm_broadcast.py
++++ b/vllm/distributed/device_communicators/shm_broadcast.py
+@@ -61,6 +61,11 @@ if TYPE_CHECKING:
+     from _typeshed import SizedBuffer
+ 
+ VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
++# A remote reader (a worker on another node) busy-polls its socket for this long after each message before it falls
++# back to sleeping in zmq's poll; 0 (default) keeps the plain blocking poll. A thread woken from an idle core starts
++# late (~0.4 ms on GB10), and with tensor parallelism across nodes every other rank then waits for it at the step's
++# first collective; decode steps arrive well inside the window, an idle server still sleeps.
++REMOTE_SPIN_SECONDS = float(os.environ.get("VLLM_MQ_REMOTE_SPIN_MS", "0") or 0) / 1000
+ # Cap on how long an idle reader parks before re-reading the authoritative SHM
+ # written-flag. Bounds lost-notify recovery latency to ~5s while the periodic
+ # wakeup stays negligible (one flag check per reader every 5s).
+@@ -912,7 +917,10 @@ class MessageQueue:
+             if overflow:
+                 obj = MessageQueue.recv(self.local_socket, timeout)
+         elif self._is_remote_reader:
+-            obj = MessageQueue.recv(self.remote_socket, timeout)
++            if REMOTE_SPIN_SECONDS > 0:
++                obj = MessageQueue.recv_spin(self.remote_socket, timeout, REMOTE_SPIN_SECONDS)
++            else:
++                obj = MessageQueue.recv(self.remote_socket, timeout)
+         else:
+             raise RuntimeError("Only readers can dequeue")
+         return obj
+@@ -926,6 +934,20 @@ class MessageQueue:
+         recv, *recv_oob = socket.recv_multipart(copy=False)
+         return pickle.loads(recv, buffers=recv_oob)
+ 
++    @staticmethod
++    def recv_spin(socket: zmq.Socket, timeout: float | None, spin: float) -> Any:
++        """recv(), polling without sleeping for up to `spin` seconds before the blocking poll (the same timeout)."""
++        start = time.monotonic()
++        while not socket.poll(timeout=0):
++            elapsed = time.monotonic() - start
++            if timeout is not None and elapsed >= timeout:
++                raise TimeoutError
++            if elapsed >= spin:
++                left = None if timeout is None else max(0.0, timeout - elapsed)
++                return MessageQueue.recv(socket, left)
++        recv, *recv_oob = socket.recv_multipart(copy=False)
++        return pickle.loads(recv, buffers=recv_oob)
++
+     def broadcast_object(self, obj=None):
+         if self._is_writer:
+             self.enqueue(obj)

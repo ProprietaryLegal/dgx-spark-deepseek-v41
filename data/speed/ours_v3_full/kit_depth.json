@@ -1,0 +1,15 @@
+{
+ "cmd": "depth",
+ "base": "http://localhost:8000",
+ "model": "dsv41",
+ "unix": 1791746813.5571642,
+ "result": [
+  {
+   "length": 32768,
+   "prompt_tokens": 32768,
+   "ttft_s": 18.550072407997504,
+   "tokens": 256,
+   "decode_tps": 128.23272796255418
+  }
+ ]
+}

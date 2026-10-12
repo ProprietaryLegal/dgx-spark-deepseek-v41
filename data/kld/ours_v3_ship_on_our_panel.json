@@ -1,0 +1,458 @@
+{
+ "positions": 254846,
+ "kld_mean": 0.024284083396196365,
+ "kld_p99": 0.3497670590877533,
+ "top1_agreement": 0.9557105302810669,
+ "nll_native": 0.404017835855484,
+ "nll_ours": 0.41650545597076416,
+ "tensors": "",
+ "exl3_ckpt": "/home/spark/models/dsv41-recipe-exl3-v3b-dk5-h4",
+ "dense": "",
+ "overlaid": {
+  "head": "/home/spark/models/dsv41-recipe-exl3-v3b-dk5-h4",
+  "0": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "1": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "2": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "3": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "4": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "5": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "6": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "7": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "8": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "9": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "10": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "11": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "12": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "13": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "14": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "15": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "16": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "17": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "18": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "19": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "20": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "21": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "22": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "23": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "24": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "25": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "26": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "27": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "28": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "29": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "30": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "31": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "32": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "33": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "34": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "35": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "36": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "37": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "38": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "39": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ]
+ },
+ "by_domain": {
+  "agentic": {
+   "kld": 0.02013319760050174,
+   "top1": 0.9579288025889967,
+   "positions": 16686
+  },
+  "chat": {
+   "kld": 0.061267589854302806,
+   "top1": 0.9197819314641744,
+   "positions": 17976
+  },
+  "code": {
+   "kld": 0.015304003300786415,
+   "top1": 0.9628588697491689,
+   "positions": 165450
+  },
+  "knowledge": {
+   "kld": 0.04499100119600842,
+   "top1": 0.9348612786489746,
+   "positions": 14093
+  },
+  "long": {
+   "kld": 0.030568796569741697,
+   "top1": 0.9577079662149846,
+   "positions": 16457
+  },
+  "math": {
+   "kld": 0.01889504753561581,
+   "top1": 0.9532235294117647,
+   "positions": 10625
+  },
+  "multilingual": {
+   "kld": 0.06915978035628104,
+   "top1": 0.9390951276102089,
+   "positions": 8620
+  },
+  "writing": {
+   "kld": 0.05776873926663597,
+   "top1": 0.9267058108928933,
+   "positions": 4939
+  }
+ },
+ "ppl_native": 1.4978306618111206,
+ "ppl_ours": 1.516652276110227
+}

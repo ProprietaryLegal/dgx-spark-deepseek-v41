@@ -1,0 +1,541 @@
+{"id": "1012", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1019", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1001", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1005", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "102", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1051", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1000", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "1040", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "1021", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1075", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1082", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1069", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "1072", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1098", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1107", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1092", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1122", "prompt_strict": false, "prompt_loose": true, "inst_strict": [true, false], "inst_loose": [true, true]}
+{"id": "1094", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1108", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1128", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1127", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false, true], "inst_loose": [false, true]}
+{"id": "1129", "prompt_strict": true, "prompt_loose": false, "inst_strict": [true, true], "inst_loose": [false, true]}
+{"id": "1087", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1137", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1139", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1147", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1148", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1131", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1132", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false, true], "inst_loose": [false, true]}
+{"id": "1153", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1162", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1174", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false, true, true], "inst_loose": [false, true, true]}
+{"id": "1187", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1180", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1130", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1203", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1217", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1219", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "1154", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1233", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "122", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1220", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1242", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1236", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1237", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1246", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1248", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1259", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1262", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1216", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1251", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1268", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1281", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1286", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1258", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1265", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1287", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1305", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "127", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1307", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "13", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1300", "prompt_strict": false, "prompt_loose": false, "inst_strict": [true, false, true], "inst_loose": [true, false, true]}
+{"id": "1314", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1332", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1325", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1322", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "136", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1348", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "1342", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "1361", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1375", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1379", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false, true, true], "inst_loose": [false, true, true]}
+{"id": "1381", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1372", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1377", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1393", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1392", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "1402", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1418", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "1389", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "142", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "1367", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "143", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1476", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1436", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1477", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1466", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1446", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1508", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1481", "prompt_strict": false, "prompt_loose": false, "inst_strict": [true, false], "inst_loose": [true, false]}
+{"id": "1516", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1498", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false], "inst_loose": [false]}
+{"id": "1512", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1480", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1535", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1537", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1546", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1518", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "152", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1561", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1548", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1551", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1571", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "1531", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1582", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "1591", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1592", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1580", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1601", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1593", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1609", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1566", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1620", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1629", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1619", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "16", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1634", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "164", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1627", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false, true, true], "inst_loose": [false, true, true]}
+{"id": "1645", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1644", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "163", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1653", "prompt_strict": false, "prompt_loose": true, "inst_strict": [false, true], "inst_loose": [true, true]}
+{"id": "1646", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1656", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1658", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1659", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1643", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1675", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1667", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1670", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "167", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1705", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "168", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1686", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1691", "prompt_strict": false, "prompt_loose": false, "inst_strict": [true, false], "inst_loose": [true, false]}
+{"id": "1738", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1739", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1733", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1713", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1730", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1746", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1776", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1773", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1759", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1793", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1800", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1779", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1802", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1813", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "179", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false], "inst_loose": [false]}
+{"id": "181", "prompt_strict": false, "prompt_loose": true, "inst_strict": [false], "inst_loose": [true]}
+{"id": "1781", "prompt_strict": false, "prompt_loose": false, "inst_strict": [true, false], "inst_loose": [true, false]}
+{"id": "1823", "prompt_strict": false, "prompt_loose": false, "inst_strict": [true, false], "inst_loose": [true, false]}
+{"id": "1843", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false, true], "inst_loose": [false, true]}
+{"id": "1825", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "1857", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1845", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1837", "prompt_strict": false, "prompt_loose": false, "inst_strict": [true, false], "inst_loose": [true, false]}
+{"id": "1834", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1883", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false, true], "inst_loose": [false, true]}
+{"id": "1858", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1886", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1880", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1897", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1902", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1906", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1879", "prompt_strict": false, "prompt_loose": false, "inst_strict": [true, false], "inst_loose": [true, false]}
+{"id": "1893", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1922", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1927", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1934", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1928", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "19", "prompt_strict": false, "prompt_loose": true, "inst_strict": [true, false], "inst_loose": [true, true]}
+{"id": "1936", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1943", "prompt_strict": false, "prompt_loose": true, "inst_strict": [false, true], "inst_loose": [true, true]}
+{"id": "1944", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1939", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1964", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false, false], "inst_loose": [false, false]}
+{"id": "1967", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "1954", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false], "inst_loose": [false]}
+{"id": "1999", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "1980", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "1996", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2015", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "202", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false], "inst_loose": [false]}
+{"id": "201", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false], "inst_loose": [false]}
+{"id": "1908", "prompt_strict": false, "prompt_loose": false, "inst_strict": [true, false, true], "inst_loose": [true, false, true]}
+{"id": "2028", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2010", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2034", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2023", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2035", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "2063", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2069", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2078", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2070", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2071", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2041", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2097", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2084", "prompt_strict": false, "prompt_loose": false, "inst_strict": [true, false], "inst_loose": [true, false]}
+{"id": "2107", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2100", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2136", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2139", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2143", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2162", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "209", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2118", "prompt_strict": false, "prompt_loose": false, "inst_strict": [true, false], "inst_loose": [true, false]}
+{"id": "2164", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2169", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "218", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2192", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "219", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2207", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2142", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2195", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2180", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2215", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2225", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2230", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2239", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2243", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2245", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2216", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "2229", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2209", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2246", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "2250", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false], "inst_loose": [false]}
+{"id": "2266", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false], "inst_loose": [false]}
+{"id": "2268", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "227", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2265", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2253", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2247", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2275", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "2299", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2284", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "2292", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2305", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2273", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false], "inst_loose": [false]}
+{"id": "2309", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2314", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2303", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2311", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2324", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2304", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2323", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2337", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2341", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2355", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2359", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2362", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2328", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2350", "prompt_strict": false, "prompt_loose": true, "inst_strict": [false], "inst_loose": [true]}
+{"id": "2380", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2372", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2383", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2386", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2357", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2381", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2374", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2395", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2396", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2391", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2392", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2398", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "240", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2404", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "24", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2417", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2436", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2439", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "2416", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "2432", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2422", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2447", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2441", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2457", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2465", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2449", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2467", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2464", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2482", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2475", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2485", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2505", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "251", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2515", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2517", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "247", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2531", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2497", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2532", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2534", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2471", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2563", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false], "inst_loose": [false]}
+{"id": "2571", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "2583", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2577", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2549", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "2589", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2585", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2567", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "260", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2602", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2596", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "2590", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2617", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2591", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2616", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2605", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2622", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2649", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2662", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2628", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2667", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2677", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2674", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2683", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "2653", "prompt_strict": false, "prompt_loose": false, "inst_strict": [true, false], "inst_loose": [true, false]}
+{"id": "2704", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "2713", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2716", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2691", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2637", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2728", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2739", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2724", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2736", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2752", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2685", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2759", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2751", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2768", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2780", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2749", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2779", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "279", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "2787", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2765", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2801", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2798", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "281", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2807", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2790", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2785", "prompt_strict": false, "prompt_loose": false, "inst_strict": [true, false], "inst_loose": [true, false]}
+{"id": "2820", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2825", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2811", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2817", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2829", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2849", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2832", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2828", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2844", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2859", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false], "inst_loose": [false]}
+{"id": "2853", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "286", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "288", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2871", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2870", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2889", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2880", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2887", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2908", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2905", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2904", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2857", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false], "inst_loose": [false]}
+{"id": "2909", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "2921", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2925", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false], "inst_loose": [false]}
+{"id": "2918", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2929", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "292", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2941", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2957", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2943", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "2912", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "296", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "295", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2977", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2969", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3001", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "301", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2985", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3025", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "2997", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3035", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3041", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3057", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3069", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "3048", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3063", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "30", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "3073", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3084", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3071", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3081", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false], "inst_loose": [false]}
+{"id": "3079", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3089", "prompt_strict": false, "prompt_loose": false, "inst_strict": [true, false, true], "inst_loose": [true, false, true]}
+{"id": "3091", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3112", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3098", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "3109", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false], "inst_loose": [false]}
+{"id": "3130", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3150", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3126", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3166", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3156", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3188", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "3131", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3195", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "3198", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "32", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3114", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "3191", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3186", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "322", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3203", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3204", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3224", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false], "inst_loose": [false]}
+{"id": "321", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3221", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3243", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3245", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3241", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3256", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false, true, true], "inst_loose": [false, true, true]}
+{"id": "3272", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "3263", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3276", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "3280", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3294", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false, true], "inst_loose": [false, true]}
+{"id": "3281", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3223", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false], "inst_loose": [false]}
+{"id": "3311", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "331", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "332", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false, true], "inst_loose": [false, true]}
+{"id": "3323", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3305", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "3287", "prompt_strict": false, "prompt_loose": true, "inst_strict": [false, true], "inst_loose": [true, true]}
+{"id": "3326", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3315", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3335", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "334", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3345", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "3327", "prompt_strict": false, "prompt_loose": false, "inst_strict": [true, true, false], "inst_loose": [true, true, false]}
+{"id": "3350", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3351", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3324", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3362", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3369", "prompt_strict": false, "prompt_loose": true, "inst_strict": [true, false], "inst_loose": [true, true]}
+{"id": "3367", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3371", "prompt_strict": false, "prompt_loose": true, "inst_strict": [true, true, false], "inst_loose": [true, true, true]}
+{"id": "3376", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3386", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "340", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3380", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3407", "prompt_strict": false, "prompt_loose": true, "inst_strict": [true, false], "inst_loose": [true, true]}
+{"id": "3409", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3401", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3414", "prompt_strict": false, "prompt_loose": true, "inst_strict": [true, false], "inst_loose": [true, true]}
+{"id": "3329", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3415", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "3428", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "337", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3424", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3434", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false, true], "inst_loose": [false, true]}
+{"id": "343", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3442", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3445", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3453", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3455", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3425", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3429", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false, true], "inst_loose": [false, true]}
+{"id": "3439", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3479", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3478", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "349", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3494", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3456", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false, false], "inst_loose": [false, false]}
+{"id": "3502", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3505", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3518", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3484", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3506", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3513", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3540", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3549", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3536", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3534", "prompt_strict": false, "prompt_loose": false, "inst_strict": [true, true, false], "inst_loose": [true, true, false]}
+{"id": "3563", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3565", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3557", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3538", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3572", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3567", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3595", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "357", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3615", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3608", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3617", "prompt_strict": false, "prompt_loose": false, "inst_strict": [false], "inst_loose": [false]}
+{"id": "3569", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3623", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3619", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3629", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3631", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3624", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3633", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3669", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3672", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "3606", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3682", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3644", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3653", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3691", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3703", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3709", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3680", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "371", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3690", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3718", "prompt_strict": false, "prompt_loose": false, "inst_strict": [true, false, true], "inst_loose": [true, false, true]}
+{"id": "3724", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "3710", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true, true], "inst_loose": [true, true, true]}
+{"id": "3739", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "374", "prompt_strict": false, "prompt_loose": true, "inst_strict": [true, false], "inst_loose": [true, true]}
+{"id": "3719", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3743", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3748", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3749", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3697", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3744", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true, true], "inst_loose": [true, true]}
+{"id": "3750", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3753", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3754", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3755", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3752", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3757", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3751", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3756", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}
+{"id": "3732", "prompt_strict": true, "prompt_loose": true, "inst_strict": [true], "inst_loose": [true]}

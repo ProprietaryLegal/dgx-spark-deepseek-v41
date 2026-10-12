@@ -1,0 +1,25 @@
+{
+ "serve": "v1_256k",
+ "spec": "drafts",
+ "depth_target": 262144,
+ "prompt_tokens": 255709,
+ "cached_tokens_r2": null,
+ "ttft_cold_s": 183.3007040519733,
+ "prefill_tok_s": 1395.0246471911857,
+ "needle_hits": 3,
+ "answer": "Amber: 6288254, Cobalt: 5826910, Saffron: 3359519",
+ "codes": [
+  "6288254",
+  "5826910",
+  "3359519"
+ ],
+ "ttft_warm_s": 1.338348538032733,
+ "decode_tok_s": 76.43885512907639,
+ "decode_tokens": 512,
+ "errors": [],
+ "mem_after_mb": {
+  "head": 7726,
+  "worker": 8990
+ },
+ "min_mem_available_mb_during": 7697
+}

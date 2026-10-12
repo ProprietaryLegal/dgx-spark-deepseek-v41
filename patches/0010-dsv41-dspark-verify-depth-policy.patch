@@ -1,0 +1,425 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0008.
+Per-round DSpark verify depth inside a fixed-shape verify window (VLLM_DSPARK_DEPTH_POLICY=conf | fixed:<d>). After each
+draft, every request verifies the depth d (0..k) with the most expected tokens per ms: expected tokens = 1 + the
+confidence head's prefix survivals, cost = a measured table of verify ms by live rows (VLLM_DSPARK_ROUND_MS) + the
+drafter (VLLM_DSPARK_DRAFT_MS). The rule is TensorFold's V4.1 depth choice (github.com/bertholomus/TensorFold, branch
+deepseek-v41-tp2, families/deepseek_v41/cuda/multi.py `_choose_k`, Apache-2.0), implemented here for vLLM's V2 runner.
+vLLM's own adaptive verification refuses V4.1 (its indexer backend cannot trim verify rows); this keeps the window's
+shape instead: rows past the depth are marked in is_padding, so the V4.1 router gives them top-k ids -1 and the routed
+experts skip their weights, and they are invalid drafts for the rejection sampler. Rows up to the depth compute what the
+full window computes for them, so greedy output does not depend on the depth. Also turns on the DSpark confidence head
+when the policy is requested. Measurement knobs: VLLM_DSPARK_DEPTH_FILE (rank 0 reads it every 64 steps and broadcasts;
+"conf:<ms by depth 0..k>" also replaces the cost table), VLLM_DSPARK_DEPTH_LOG=N (depth histogram, drafts verified /
+accepted). Tests: patches/tests/test_dspark_depth_policy.py,
+patches/exl3_moe/tests/test_smoe_gpu.py::test_dead_rows_leave_live_rows_bit_identical.
+
+diff --git a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runner.py
+index 1b9d060..55d6c07 100644
+--- a/vllm/v1/worker/gpu/model_runner.py
++++ b/vllm/v1/worker/gpu/model_runner.py
+@@ -153,6 +153,10 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
+     maybe_create_adaptive_verification_manager,
+     resolve_adaptive_cudagraph_mode,
+ )
++from vllm.v1.worker.gpu.spec_decode.depth_policy import (
++    DSparkDepthPolicy,
++    depth_policy_requested,
++)
+ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+     set_eagle3_aux_hidden_state_layers,
+     verify_supports_aux_hidden_states_over_pp,
+@@ -306,6 +310,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+             num_prefill_lookahead=num_prefill_lookahead,
+         )
+         self.adaptive_verification: AdaptiveVerificationManager | None = None
++        self.depth_policy: DSparkDepthPolicy | None = None
+         self.input_buffers = InputBuffers(
+             max_num_reqs=self.max_num_reqs,
+             max_num_tokens=self.max_num_tokens,
+@@ -675,6 +680,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+             target_layer_names=target_attn_layer_names,
+             additional_attn_cg_support=additional_attn_cg_support,
+         )
++        if self.speculator is not None and depth_policy_requested():
++            if self.adaptive_verification is not None:
++                logger.warning(
++                    "VLLM_DSPARK_DEPTH_POLICY ignored: adaptive verification is on."
++                )
++            elif getattr(self, "batch_sharder", None) is not None:
++                logger.warning(
++                    "VLLM_DSPARK_DEPTH_POLICY ignored with batch-sharded sampling."
++                )
++            else:
++                self.depth_policy = DSparkDepthPolicy(
++                    self.num_speculative_steps,
++                    self.max_num_reqs,
++                    self.device,
++                    has_confidence=getattr(
++                        self.speculator, "use_confidence_head", False
++                    ),
++                )
+ 
+         self.block_tables = BlockTables(
+             block_sizes=block_sizes,
+@@ -1176,6 +1199,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+             req_index = self.req_states.req_id_to_index[req_id]
+             if self.adaptive_verification is not None:
+                 self.adaptive_verification.add_request(req_index)
++            if self.depth_policy is not None:
++                self.depth_policy.reset(req_index)
+ 
+             if self.pooling_runner is not None:
+                 assert new_req_data.pooling_params is not None
+@@ -1462,6 +1487,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+             self.model_state.num_new_sampled_tokens_per_step,
+         )
+ 
++        # Per-round DSpark depth: rows past a request's depth take no routed
++        # experts (the router reads is_padding: top-k ids -1) and their drafts
++        # are rejected in sample().
++        depth_dead_rows = None
++        if (
++            self.depth_policy is not None
++            and num_draft_tokens_per_req is not None
++            and total_num_draft_tokens > 0
++        ):
++            depth_dead_rows = self.depth_policy.dead_rows(
++                expanded_idx_mapping, expanded_local_pos
++            )
++            is_padding[logits_indices.long()] = depth_dead_rows
++
+         fast_prefill = None
+         if self.fast_prefill is not None:
+             fast_prefill = self.fast_prefill.prepare(
+@@ -1529,6 +1568,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+                 else None
+             ),
+         )
++        input_batch.depth_dead_rows = depth_dead_rows
+         if self.pcp_manager is not None:
+             input_batch = self.pcp_manager.partition_batch(input_batch, batch_desc)
+         return input_batch
+@@ -1612,6 +1652,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+                 grammar_output.num_acceptable_drafts,
+             )
+ 
++        if self.depth_policy is not None and input_batch.num_draft_tokens > 0:
++            # Rows past the depth ran without routed experts: never accept them.
++            dead = getattr(input_batch, "depth_dead_rows", None)
++            if dead is None or dead.shape[0] != logits.shape[0]:
++                raise RuntimeError("DSpark depth policy: no depth mask for this batch")
++            invalid_drafts = dead if invalid_drafts is None else invalid_drafts | dead
++
+         sampler_output: SamplerOutput | None
+         if input_batch.num_reqs == 0:
+             # This rank owns no requests this step. It contributes an
+@@ -2121,6 +2168,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+         sampler_output, num_sampled, num_rejected = self.sample(
+             hidden_states, input_batch, grammar_output
+         )
++        if self.depth_policy is not None and input_batch.num_draft_tokens > 0:
++            self.depth_policy.observe(
++                input_batch.idx_mapping,
++                num_sampled,
++                input_batch.num_draft_tokens_per_req,
++                input_batch.num_reqs,
++            )
+ 
+         if self.pp_handler is not None:
+             # Broadcast to non-last PP ranks (handles spec decode multi-token).
+@@ -2245,6 +2299,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+                 self.adaptive_verification.record_confidences(
+                     self.speculator.draft_token_confidence_probs, input_batch
+                 )
++            if self.depth_policy is not None:
++                self.depth_policy.record(
++                    self.speculator.draft_token_confidence_probs,
++                    input_batch.idx_mapping,
++                    input_batch.num_reqs,
++                )
+ 
+         if self.num_speculative_steps > 0:
+             # Spec-decode and diffusion LLMs both use draft tokens but the latter does
+diff --git a/vllm/v1/worker/gpu/spec_decode/depth_policy.py b/vllm/v1/worker/gpu/spec_decode/depth_policy.py
+new file mode 100644
+index 0000000..22aaab2
+--- /dev/null
++++ b/vllm/v1/worker/gpu/spec_decode/depth_policy.py
+@@ -0,0 +1,251 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Per-round DSpark verify depth inside a fixed-shape verify window.
++
++After each draft, every request gets the verify depth d in 0..k with the most
++expected tokens per millisecond: expected tokens = 1 + the sum of the
++confidence head's prefix survivals (running products of its per-position
++acceptance probabilities), cost = the verify forward with d + 1 live rows plus
++the drafter pass, from a measured table. The rule is TensorFold's DeepSeek-V4.1
++depth choice (github.com/bertholomus/TensorFold, branch deepseek-v41-tp2,
++src/tensorfold/families/deepseek_v41/cuda/multi.py ``_choose_k``, Apache-2.0),
++written here for the V2 model runner.
++
++The window keeps its shape, so captured CUDA graphs and attention backends are
++untouched. Rows past a request's depth are marked as MoE padding (the router
++gives them top-k ids of -1 and routed-expert kernels skip their weights) and
++as invalid drafts (the rejection sampler never accepts them). Rows up to the
++depth compute what a full window computes for them (attention is causal, MoE
++and dense rows are independent), so the depth decides how many drafts can be
++accepted and never which tokens come out.
++
++Environment:
++  VLLM_DSPARK_DEPTH_POLICY  "conf" (the rule above), "fixed:<d>" (every request
++                            verifies d drafts) or unset / "0" (off)
++  VLLM_DSPARK_ROUND_MS      verify forward ms for 1..k+1 live rows, comma separated
++  VLLM_DSPARK_DRAFT_MS      the drafter pass in ms
++  VLLM_DSPARK_DEPTH_FILE    a file holding a policy string, re-read every 64
++                            verify steps (to sweep depths in one serve);
++                            "conf:<ms,...>" also replaces the cost table (round
++                            ms by depth 0..k, drafter included)
++  VLLM_DSPARK_DEPTH_LOG     N > 0: every N verify steps, log the chosen depths and
++                            the drafts verified / accepted
++"""
++
++import os
++
++import numpy as np
++import torch
++
++from vllm.logger import init_logger
++
++logger = init_logger(__name__)
++
++# Our two-Spark serve (DeepSeek-V4.1-Flash, EXL3 routed experts): verify forward
++# ms for 1..6 live rows and the drafter pass, until a measured table is given.
++_DEFAULT_ROUND_MS = (38.0, 41.0, 44.0, 46.5, 48.5, 50.5)
++_DEFAULT_DRAFT_MS = 4.5
++_FILE_EVERY = 64
++
++
++def _parse_policy(text: str | None) -> tuple[str, int]:
++    p = (text or "").strip().lower()
++    if p in ("", "0", "off", "none"):
++        return "off", 0
++    if p == "conf" or p.startswith("conf:"):
++        return "conf", 0
++    if p.startswith("fixed:"):
++        return "fixed", max(0, int(p.split(":", 1)[1]))
++    raise ValueError(
++        f"VLLM_DSPARK_DEPTH_POLICY={text!r}: expected 'conf', 'fixed:<d>' or '0'"
++    )
++
++
++def _parse_table(text: str | None) -> list[float] | None:
++    """The round-cost table of a "conf:<ms,ms,...>" policy string (depth 0 first)."""
++    p = (text or "").strip().lower()
++    if not p.startswith("conf:"):
++        return None
++    return [float(x) for x in p.split(":", 1)[1].split(",") if x.strip()]
++
++
++def depth_policy_requested() -> bool:
++    return _parse_policy(os.environ.get("VLLM_DSPARK_DEPTH_POLICY"))[0] != "off"
++
++
++def round_cost_ms(num_steps: int) -> list[float]:
++    """Verify forward + drafter ms for depth 0..num_steps (1..num_steps+1 rows)."""
++    text = os.environ.get("VLLM_DSPARK_ROUND_MS", "")
++    rows = [float(x) for x in text.split(",") if x.strip()] or list(_DEFAULT_ROUND_MS)
++    while len(rows) < num_steps + 1:
++        # Past the table: the last measured step per row.
++        slope = rows[-1] - rows[-2] if len(rows) > 1 else 0.0
++        rows.append(rows[-1] + slope)
++    draft_ms = float(os.environ.get("VLLM_DSPARK_DRAFT_MS") or _DEFAULT_DRAFT_MS)
++    return [rows[d] + draft_ms for d in range(num_steps + 1)]
++
++
++def choose_depth(confidence_probs: torch.Tensor, cost_ms: torch.Tensor) -> torch.Tensor:
++    """[n, k] per-position acceptance probabilities -> [n] int32 depths in 0..k."""
++    conf = confidence_probs.float().clamp(0.0, 1.0)
++    survival = torch.cumprod(conf, dim=1)
++    expected = torch.cat(
++        (torch.ones_like(conf[:, :1]), 1.0 + torch.cumsum(survival, dim=1)), dim=1
++    )
++    # argmax keeps the first (shallowest) depth among equal rates.
++    return torch.argmax(expected / cost_ms, dim=1).to(torch.int32)
++
++
++class DSparkDepthPolicy:
++    def __init__(
++        self,
++        num_speculative_steps: int,
++        max_num_reqs: int,
++        device: torch.device,
++        has_confidence: bool,
++    ):
++        self.k = num_speculative_steps
++        self._has_conf = has_confidence
++        self.mode, self.fixed = _parse_policy(
++            os.environ.get("VLLM_DSPARK_DEPTH_POLICY")
++        )
++        if self.mode == "conf" and not has_confidence:
++            raise ValueError(
++                "VLLM_DSPARK_DEPTH_POLICY=conf needs the draft model's confidence "
++                "head, which this checkpoint does not load."
++            )
++        cost = round_cost_ms(self.k)
++        self.cost_ms = torch.tensor(cost, dtype=torch.float32, device=device)
++        self.depth = torch.full(
++            (max_num_reqs,), self.k, dtype=torch.int32, device=device
++        )
++        self.file = os.environ.get("VLLM_DSPARK_DEPTH_FILE") or None
++        self.log_every = int(os.environ.get("VLLM_DSPARK_DEPTH_LOG") or 0)
++        self.num_records = 0
++        self._observed = 0
++        # Logging counters (device): depth histogram, drafts verified, accepted.
++        self._hist = torch.zeros(self.k + 1, dtype=torch.int64, device=device)
++        self._live = torch.zeros((), dtype=torch.int64, device=device)
++        self._kept = torch.zeros((), dtype=torch.int64, device=device)
++        logger.info(
++            "DSpark depth policy %s (k=%d), round cost ms by depth %s",
++            self.describe(),
++            self.k,
++            [round(c, 2) for c in cost],
++        )
++
++    def describe(self) -> str:
++        return f"fixed:{self.fixed}" if self.mode == "fixed" else self.mode
++
++    def reset(self, req_index: int) -> None:
++        self.depth[req_index] = self.k
++
++    def _maybe_reload(self) -> None:
++        """Measurement knob: take the policy in VLLM_DSPARK_DEPTH_FILE. Rank 0 reads
++        the file and broadcasts it, so every rank switches at the same step (ranks
++        that chose different depths would accept different tokens)."""
++        if self.file is None or self.num_records % _FILE_EVERY:
++            return
++        from vllm.distributed.parallel_state import get_tp_group
++
++        try:
++            tp = get_tp_group()
++        except AssertionError:  # no model parallel group (single-process tests)
++            tp = None
++        text = None
++        if tp is None or tp.rank_in_group == 0:
++            try:
++                with open(self.file) as f:
++                    text = f.read()
++            except OSError:
++                text = None
++        if tp is not None and tp.world_size > 1:
++            text = tp.broadcast_object(text, src=0)
++        if text is None:
++            return
++        try:
++            mode, fixed = _parse_policy(text)
++        except ValueError as e:
++            logger.warning("DSpark depth file %s ignored: %s", self.file, e)
++            return
++        if mode == "conf" and not self._has_conf:
++            logger.warning("DSpark depth file %s: no confidence head", self.file)
++            return
++        table = _parse_table(text)
++        if table:
++            while len(table) < self.k + 1:
++                table.append(table[-1] + (table[-1] - table[-2] if len(table) > 1 else 0.0))
++            new = torch.tensor(table[: self.k + 1], dtype=torch.float32, device=self.cost_ms.device)
++            if not torch.equal(new, self.cost_ms):
++                self.cost_ms.copy_(new)
++                logger.info("DSpark depth cost table -> %s", [round(c, 2) for c in table[: self.k + 1]])
++        if (mode, fixed) != (self.mode, self.fixed):
++            self.mode, self.fixed = mode, fixed
++            logger.info("DSpark depth policy -> %s", self.describe())
++
++    def record(
++        self,
++        confidence_probs: torch.Tensor,
++        idx_mapping: torch.Tensor,
++        num_reqs: int,
++    ) -> None:
++        """Choose each request's depth for the drafts just proposed."""
++        if num_reqs == 0:
++            return
++        self._maybe_reload()
++        self.num_records += 1
++        if self.mode == "off":
++            depth = torch.full(
++                (num_reqs,), self.k, dtype=torch.int32, device=self.depth.device
++            )
++        elif self.mode == "fixed":
++            depth = torch.full(
++                (num_reqs,),
++                min(self.fixed, self.k),
++                dtype=torch.int32,
++                device=self.depth.device,
++            )
++        else:
++            depth = choose_depth(confidence_probs[:num_reqs], self.cost_ms)
++        self.depth.index_copy_(0, idx_mapping[:num_reqs].long(), depth)
++
++    def dead_rows(
++        self, expanded_idx_mapping: torch.Tensor, expanded_local_pos: torch.Tensor
++    ) -> torch.Tensor:
++        """Logits rows past their request's depth: local position p holds draft p."""
++        return expanded_local_pos > self.depth[expanded_idx_mapping.long()]
++
++    def observe(
++        self,
++        idx_mapping: torch.Tensor,
++        num_sampled: torch.Tensor,
++        num_drafts_per_req: np.ndarray | None,
++        num_reqs: int,
++    ) -> None:
++        """Count drafts verified and accepted; log every VLLM_DSPARK_DEPTH_LOG steps."""
++        if self.log_every <= 0 or num_reqs == 0 or num_drafts_per_req is None:
++            return
++        depth = self.depth[idx_mapping[:num_reqs].long()].long()
++        drafts = torch.from_numpy(
++            np.ascontiguousarray(num_drafts_per_req[:num_reqs], dtype=np.int64)
++        ).to(depth.device, non_blocking=True)
++        self._hist.index_add_(0, depth.clamp(max=self.k), torch.ones_like(depth))
++        self._live += torch.minimum(depth, drafts).sum()
++        self._kept += (num_sampled[:num_reqs].long() - 1).clamp(min=0).sum()
++        self._observed += 1
++        if self._observed % self.log_every == 0:
++            hist = self._hist.tolist()
++            live, kept, rounds = int(self._live), int(self._kept), sum(hist)
++            logger.info(
++                "DSpark depth %s: depths %s, drafts verified %d, accepted %d "
++                "(%.1f%%), tokens per verify %.2f",
++                self.describe(),
++                " ".join(f"{d}:{n}" for d, n in enumerate(hist) if n),
++                live,
++                kept,
++                100.0 * kept / max(live, 1),
++                (kept + rounds) / max(rounds, 1),
++            )
++            self._hist.zero_()
++            self._live.zero_()
++            self._kept.zero_()
+diff --git a/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py b/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py
+index 02dd336..a0ac116 100644
+--- a/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py
++++ b/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py
+@@ -32,6 +32,7 @@ from vllm.config.compilation import CUDAGraphMode
+ from vllm.logger import init_logger
+ from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
++from vllm.v1.worker.gpu.spec_decode.depth_policy import depth_policy_requested
+ from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
+ 
+ logger = init_logger(__name__)
+@@ -103,10 +104,10 @@ class DSparkSpeculator(DFlashSpeculator):
+                 dtype=self.draft_logits.dtype,
+                 device=self.device,
+             )
++        # The per-round depth policy (depth_policy.py) reads the confidences too.
+         self.use_confidence_head = (
+-            self.enable_adaptive_verification
+-            and model.model.confidence_head is not None
+-        )
++            self.enable_adaptive_verification or depth_policy_requested()
++        ) and model.model.confidence_head is not None
+         if self.use_confidence_head:
+             # The acceptance estimator is not needed when a trained confidence head
+             # is available.

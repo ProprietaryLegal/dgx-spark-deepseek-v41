@@ -1,0 +1,64 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0006.
+DeepSeek-V4.1 weight-name mapping for a head stored as quantization pieces (head.trellis / suh / svh / mul1 | mcg, the
+EXL3 pack convention): a regex rule routes them to lm_head (text model) or language_model.lm_head (the VL wrapper V4.1
+checkpoints declare) the way the existing suffix rule routes head.weight. The checkpoint's own head.weight is untouched.
+Used by the recipe's vllm_exl3_moe plugin for its opt-in EXL3 head.
+Test: patches/tests/test_head_pieces_mapper.py (CPU; 2 of 4 fail on the image without this patch, 4 of 4 pass with it).
+
+diff --git a/vllm/models/deepseek_v41/nvidia/model.py b/vllm/models/deepseek_v41/nvidia/model.py
+index bec0353..a2a377d 100644
+--- a/vllm/models/deepseek_v41/nvidia/model.py
++++ b/vllm/models/deepseek_v41/nvidia/model.py
+@@ -1395,6 +1395,9 @@ def _linear_scale_param_name(vllm_config: VllmConfig, expert_dtype: str) -> str:
+     return "weight_scale" if use_mxfp8 else "weight_scale_inv"
+ 
+ 
++HEAD_PIECES = r"^head\.(trellis|suh|svh|mul1|mcg)$"
++
++
+ def _make_deepseek_v4_weights_mapper(
+     expert_dtype: str, linear_scale_name: str = "weight_scale_inv"
+ ) -> WeightsMapper:
+@@ -1427,6 +1430,9 @@ def _make_deepseek_v4_weights_mapper(
+             re.compile(r"(engram\.embed)\.scale$"): r"\1_tokens.weight_scale_inv",
+             re.compile(r"\.scale$"): f".{linear_scale_name}",
+         }
++    # A quantized head stored as pieces (e.g. EXL3: head.trellis / suh / svh / mul1)
++    # loads into lm_head like head.weight does.
++    scale_regex[re.compile(HEAD_PIECES)] = r"lm_head.\1"
+     return WeightsMapper(
+         orig_to_new_prefix={
+             "layers.": "model.layers.",
+diff --git a/vllm/models/deepseek_v41/nvidia/vl_model.py b/vllm/models/deepseek_v41/nvidia/vl_model.py
+index d677534..32b2094 100644
+--- a/vllm/models/deepseek_v41/nvidia/vl_model.py
++++ b/vllm/models/deepseek_v41/nvidia/vl_model.py
+@@ -19,6 +19,7 @@ Thin multimodal wrapper around the text-only ``DeepseekV41LLMForCausalLM``:
+ from collections.abc import Iterable
+ from typing import Annotated
+ 
++import regex as re
+ import torch
+ from torch import nn
+ 
+@@ -53,6 +54,7 @@ from ..common.mm_preprocess import (
+ from ..common.vl_cudagraph import DeepseekV4VLEncoderCudaGraphMixin
+ from ..decoder_replay_layers import DecoderReplayLayers
+ from .model import (
++    HEAD_PIECES,
+     DeepseekV41LLMForCausalLM,
+     _linear_scale_param_name,
+     _make_deepseek_v4_weights_mapper,
+@@ -92,9 +94,11 @@ def _make_deepseek_v4_vl_weights_mapper(
+         "hc_head": "language_model.model.hc_head",
+         "mtp.": "language_model.model.mtp.",
+     }
++    regex = {p: r for p, r in base.orig_to_new_regex.items() if p.pattern != HEAD_PIECES}
++    regex[re.compile(HEAD_PIECES)] = r"language_model.lm_head.\1"
+     return WeightsMapper(
+         orig_to_new_prefix=orig_to_new_prefix,
+-        orig_to_new_regex=base.orig_to_new_regex,
++        orig_to_new_regex=regex,
+         orig_to_new_suffix={
+             "head.weight": "language_model.lm_head.weight",
+             "embed.weight": "embed_tokens.weight",

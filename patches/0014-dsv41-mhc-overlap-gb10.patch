@@ -1,0 +1,41 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 (touches no file of patches 0001-0013).
+mHC's coefficient overlap on GB10 (VLLM_DSV41_MHC_OVERLAP=1; default off). In FULL decode graphs of up to 16 tokens,
+vLLM's V4.1 decoder layer can compute each sublayer's mix statistics (the 24 x 20480 prenorm dots + 20 Sinkhorn
+iterations) on a side stream and only the normalized input on the main stream, because the reference collapses a
+sublayer's input with the *previous* sublayer's pre-mix: the new mixes are needed only at this sublayer's post
+(mhc_pre_delayed_overlap / mhc_shifted_post_pre with a stream). supports_mhc_overlap admits family 100 only; on GB10
+the path's kernels exist too (DeepGEMM's tf32_hc_prenorm_gemm has an sm120 build, already in our profiles, and the
+split pre-norm epilogue is the TileLang kernel the default path runs), while the SM100-only pieces (mega mHC, the fused
+TP=4 all-reduce + mHC) keep their own checks. TensorFold moved the same work to a side stream on these boxes
+(github.com/bertholomus/TensorFold, branch deepseek-v41-tp2, a8e1a5c / bd0024d: drafted forward 46.1 -> 45.5 ms).
+The mix statistics go through DeepGEMM's TF32 GEMM (as on B200) instead of the TileLang fused path: not bit-identical,
+check KLD and the oracle before turning it on.
+
+diff --git a/vllm/models/deepseek_v41/nvidia/ops/mhc.py b/vllm/models/deepseek_v41/nvidia/ops/mhc.py
+index edfdbd1..7de8e34 100644
+--- a/vllm/models/deepseek_v41/nvidia/ops/mhc.py
++++ b/vllm/models/deepseek_v41/nvidia/ops/mhc.py
+@@ -5,6 +5,7 @@
+ from functools import partial
+ from typing import TYPE_CHECKING, cast
+ 
++import os
+ import torch
+ 
+ from vllm.config import VllmConfig
+@@ -46,8 +47,14 @@ def supports_mhc_overlap(vllm_config: VllmConfig) -> bool:
+     config = vllm_config.model_config.hf_config
+     # DeepGEMM's prenorm kernel requires K % 64 == 0, N % 8 == 0, and N <= 32.
+     mix_size = config.hc_mult * (config.hc_mult + 2)
++    # VLLM_DSV41_MHC_OVERLAP=1 also admits family-120 Blackwell (GB10): DeepGEMM's tf32 prenorm GEMM has an sm120
++    # build and the split pre-norm epilogue is the TileLang kernel the default path already runs there.
++    family = current_platform.is_device_capability_family(100) or (
++        os.environ.get("VLLM_DSV41_MHC_OVERLAP", "0") == "1"
++        and current_platform.is_device_capability_family(120)
++    )
+     return (
+-        current_platform.is_device_capability_family(100)
++        family
+         and is_deep_gemm_supported()
+         and config.hidden_size % 64 == 0
+         and 0 < mix_size <= 32

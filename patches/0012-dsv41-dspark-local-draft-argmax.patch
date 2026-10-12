@@ -1,0 +1,197 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0008 + 0010 + 0011.
+DSpark greedy drafts argmaxed per vocabulary shard (VLLM_DSPARK_LOCAL_ARGMAX=1, with VLLM_DSPARK_MARKOV_CACHE). The
+sequential Markov sampling all-gathered the full draft logits from the TP-sharded lm_head (129,280 columns a draft row)
+and added a full-vocab Markov bias on every rank at every draft position. Now each rank adds the bias for its own
+columns only (the Markov cache built over its row range of the replicated markov_w2: half the rows and half the cache
+memory at TP=2) to its own shard of the base logits, takes the local max, and all-gathers one (value, index) pair per
+row, the reduction vLLM's LogitsProcessor.get_top_tokens uses for vocab-parallel argmax. Equal maxima resolve to the
+lower rank, i.e. the lower vocabulary index, so the drafts are the tokens the full path picks, bit for bit (same base
+logit columns, same bias kernel per column). Greedy drafting only, and only without the acceptance estimator (it reads
+full logits; the confidence head replaces it under the depth policy). TensorFold's V4.1 drafter splits its Markov dot
+by vocabulary halves with a (value, index) argmax gather the same way (github.com/bertholomus/TensorFold, branch
+deepseek-v41-tp2, families/deepseek_v41/cuda/markov.py, Apache-2.0); this is our implementation for vLLM.
+Test: patches/tests/test_dspark_local_argmax.py.
+
+diff --git a/vllm/models/deepseek_v41/nvidia/dspark.py b/vllm/models/deepseek_v41/nvidia/dspark.py
+index 79332c6..9c35c85 100644
+--- a/vllm/models/deepseek_v41/nvidia/dspark.py
++++ b/vllm/models/deepseek_v41/nvidia/dspark.py
+@@ -23,6 +23,7 @@ from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
+ from vllm.distributed import (
+     get_tensor_model_parallel_rank,
+     get_tensor_model_parallel_world_size,
++    tensor_model_parallel_all_gather,
+ )
+ from vllm.forward_context import get_forward_context, is_forward_context_available
+ from vllm.logger import init_logger
+@@ -311,6 +312,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
+         # Cached Markov bias rows (ops/markov_cache.py), built after loading when
+         # VLLM_DSPARK_MARKOV_CACHE names a token list.
+         self._markov_cache = None
++        # VLLM_DSPARK_LOCAL_ARGMAX=1: greedy drafts argmax each rank's vocabulary shard of
++        # (base logits + Markov bias) and all-gather only (value, index) per row, instead of
++        # all-gathering the full draft logits and adding a full-vocab bias on every rank.
++        self._markov_cache_local = None
+ 
+     # --- Hooks used by the speculator -------------------------------------
+ 
+@@ -385,12 +390,65 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
+         if ref.shape != (probe.numel(), w2.shape[0]):
+             logger.warning("DSpark Markov cache off: bias shape %s", tuple(ref.shape))
+             return
++        shard = self._vocab_shard()
++        if os.environ.get("VLLM_DSPARK_LOCAL_ARGMAX") == "1" and shard is not None:
++            # this rank's columns only; the full-vocab rows are not needed then
++            lo, hi = shard
++            cache = MarkovBiasCache(w1, w2[lo:hi], ref.dtype)
++            got = cache(probe, self.markov_embed(probe))
++            ref = ref[:, lo:hi]
++            err = (got.float() - ref.float()).abs().max() / ref.float().abs().max()
++            logger.info(
++                "DSpark Markov cache, vocab columns %d-%d (local draft argmax): "
++                "max rel diff vs the GEMM path %.2e", lo, hi, err)
++            self._markov_cache_local = cache
++            return
+         cache = MarkovBiasCache(w1, w2, ref.dtype)
+         got = cache(probe, self.markov_embed(probe))
+         err = (got.float() - ref.float()).abs().max() / ref.float().abs().max()
+         logger.info("DSpark Markov cache: max rel diff vs the GEMM path %.2e", err)
+         self._markov_cache = cache
+ 
++    def _vocab_shard(self) -> tuple[int, int] | None:
++        """[start, end) of this rank's real vocabulary columns in the TP-sharded lm_head,
++        or None when the head is not sharded."""
++        if getattr(self.lm_head, "tp_size", 1) <= 1:
++            return None
++        si = self.lm_head.shard_indices
++        return si.org_vocab_start_index, si.org_vocab_end_index
++
++    def supports_local_argmax(self) -> bool:
++        return self._markov_cache_local is not None
++
++    def compute_draft_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
++        """This rank's vocabulary shard of the base draft logits (no gather): the columns
++        compute_draft_logits would gather from this rank, bit for bit."""
++        return self.logits_processor(
++            self.lm_head, self.model.norm(hidden_states), skip_gather=True
++        )
++
++    def draft_argmax_local(
++        self,
++        base_local: torch.Tensor,
++        token_ids: torch.Tensor,
++        markov_embed: torch.Tensor,
++    ) -> torch.Tensor:
++        """Greedy draft ids from this rank's shard of base logits + Markov bias: local
++        (max, argmax), then an all-gather of one (value, index) pair per row per rank,
++        as LogitsProcessor.get_top_tokens does. Equal maxima resolve to the lower rank,
++        i.e. the lower vocabulary index, the same token torch.argmax over the gathered
++        logits returns."""
++        assert self._markov_cache_local is not None
++        lo, hi = self._vocab_shard()
++        bias = self._markov_cache_local(token_ids, markov_embed)
++        logits = base_local[:, : hi - lo] + bias
++        vals, idx = logits.max(dim=-1)
++        pair = torch.stack([vals.float(), (idx + lo).float()], dim=-1)
++        tp = self.lm_head.tp_size
++        gathered = tensor_model_parallel_all_gather(pair, dim=-1).view(-1, tp, 2)
++        best = gathered[:, :, 0].argmax(dim=-1, keepdim=True)
++        return gathered[:, :, 1].gather(dim=-1, index=best).squeeze(-1).to(torch.int64)
++
+     def apply_markov_bias_gathered(
+         self,
+         markov_embed: torch.Tensor,
+diff --git a/vllm/models/deepseek_v41/nvidia/ops/markov_cache.py b/vllm/models/deepseek_v41/nvidia/ops/markov_cache.py
+index 76078f2..e040da0 100644
+--- a/vllm/models/deepseek_v41/nvidia/ops/markov_cache.py
++++ b/vllm/models/deepseek_v41/nvidia/ops/markov_cache.py
+@@ -14,6 +14,10 @@ implementation.
+ 
+ VLLM_DSPARK_MARKOV_CACHE: a JSON list of token ids to cache (most frequent
+ first); VLLM_DSPARK_MARKOV_CACHE_ROWS caps how many are used (default 4096).
++
++``w2`` may be a contiguous row range of markov_w2 (one TP rank's vocabulary
++shard, for the local draft argmax): rows are then that range's bias, still keyed
++by the previous token over the whole vocabulary (``w1``'s rows).
+ """
+ 
+ import json
+@@ -111,7 +115,8 @@ class MarkovBiasCache:
+         rows = int(os.environ.get("VLLM_DSPARK_MARKOV_CACHE_ROWS") or 4096)
+         with open(path) as f:
+             ids = [int(t) for t in json.load(f)]
+-        vocab, rank = w2.shape
++        vocab = w1.shape[0]                   # previous-token vocabulary (the keys)
++        out_vocab = w2.shape[0]               # bias columns: the whole vocab or a shard
+         seen: set[int] = set()
+         ids = [t for t in ids if 0 <= t < vocab and not (t in seen or seen.add(t))]
+         ids = ids[:rows]
+@@ -119,7 +124,7 @@ class MarkovBiasCache:
+         self.w2 = w2
+         self.out_dtype = out_dtype
+         self.slot_of_token = torch.full((vocab,), -1, dtype=torch.int32, device=dev)
+-        self.cache = torch.empty((len(ids), vocab), dtype=out_dtype, device=dev)
++        self.cache = torch.empty((len(ids), out_vocab), dtype=out_dtype, device=dev)
+         if ids:
+             tok = torch.tensor(ids, dtype=torch.int64, device=dev)
+             # The rows come from the same kernel as uncached tokens (all slots -1
+diff --git a/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py b/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py
+index 1237560..b0b0561 100644
+--- a/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py
++++ b/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py
+@@ -83,6 +83,9 @@ class DSparkSpeculator(DFlashSpeculator):
+         self.use_confidence_head: bool = False
+         # The model reads cached Markov bias rows by token id when it has them.
+         self._markov_by_ids: bool = False
++        # Greedy drafts reduced per vocabulary shard (VLLM_DSPARK_LOCAL_ARGMAX); set in
++        # load_draft_model once the model has its local bias rows.
++        self._local_argmax: bool = False
+ 
+     def load_draft_model(
+         self,
+@@ -115,6 +118,16 @@ class DSparkSpeculator(DFlashSpeculator):
+             # is available.
+             self.use_acceptance_estimator = False
+         self._markov_by_ids = hasattr(model, "markov_bias_for_ids")
++        # The local argmax never materializes full draft logits: greedy drafting only, and
++        # no acceptance estimator (it reads the full logits; the confidence head replaces it).
++        self._local_argmax = (
++            getattr(model, "supports_local_argmax", lambda: False)()
++            and self.draft_logits is None
++            and not self.use_acceptance_estimator
++            and self._draft_topk is None
++        )
++        if self._local_argmax:
++            logger.info("DSpark: greedy drafts argmax per vocabulary shard (local argmax)")
+         return model
+ 
+     def _sample_logits(
+@@ -167,8 +180,12 @@ class DSparkSpeculator(DFlashSpeculator):
+         num_sample = num_reqs * n_spec
+         # Per-(req, position) head hidden, ordered (req, step).
+         sample_hidden = head_hidden[self.sample_indices[:num_sample]]
+-        # Draft-vocab logits; sampled ids are remapped to target vocab below.
+-        base_logits = self.model.compute_draft_logits(sample_hidden)
++        if self._local_argmax:
++            # this rank's vocabulary shard of the base logits, never gathered
++            base_logits = self.model.compute_draft_logits_local(sample_hidden)
++        else:
++            # Draft-vocab logits; sampled ids are remapped to target vocab below.
++            base_logits = self.model.compute_draft_logits(sample_hidden)
+         vocab_size = base_logits.shape[-1]
+         base_logits = base_logits.view(num_reqs, n_spec, vocab_size)
+ 
+@@ -185,6 +202,13 @@ class DSparkSpeculator(DFlashSpeculator):
+             markov_embed = self.model.markov_embed(prev)
+             if self.use_confidence_head:
+                 confidence_markov_embeds.append(markov_embed)
++            if self._local_argmax:
++                draft_sampled_i = self.model.draft_argmax_local(
++                    base_logits[:, i], prev, markov_embed
++                )
++                self.draft_tokens[:num_reqs, i] = draft_sampled_i
++                prev = draft_sampled_i
++                continue
+             if self._markov_by_ids:
+                 bias = self.model.markov_bias_for_ids(prev, markov_embed)
+             else:

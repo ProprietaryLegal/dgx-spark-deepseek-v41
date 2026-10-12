@@ -1,0 +1,52 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0017.
+VLLM_MOE_GATE_FIRST=1 (default off): the MoE runner applies the router gate before it forks the shared experts onto the
+aux stream, instead of after. The router feeds top-k and the routed experts, the critical path of a decode MoE; the
+shared expert only has to finish before the final add. Forked first, the shared expert's kernels take the SMs and the
+router GEMM waits for them: on V4.1 decode (2x GB10, TP=2, k=5) the router starts a median 19.3 us after its input is
+ready, over 1,400 profiled layers (LOG Oct 11 05:52). Same math, same order of floating-point work on each stream.
+
+--- a/vllm/model_executor/layers/fused_moe/runner/moe_runner.py
++++ b/vllm/model_executor/layers/fused_moe/runner/moe_runner.py
+@@ -4,6 +4,7 @@
+ from contextlib import nullcontext
+ from typing import TYPE_CHECKING, cast
+ 
++import os
+ import torch
+ import torch.nn.functional as F
+ 
+@@ -53,6 +54,7 @@
+     direct_register_custom_op,
+ )
+ 
++_MOE_GATE_FIRST = os.environ.get("VLLM_MOE_GATE_FIRST", "0") == "1"
+ logger = init_logger(__name__)
+ 
+ 
+@@ -889,6 +891,17 @@
+         # TODO(bnell): this can be removed after MK migration is complete.
+         self.routed_experts._ensure_moe_quant_config_init()
+ 
++        # VLLM_MOE_GATE_FIRST=1: the router GEMM goes into the stream before the
++        # shared experts fork to the aux stream. The router feeds top-k and the
++        # routed experts (the critical path); forked first, the shared expert's
++        # blocks take the SMs and the router waits for them (~19 us a decode
++        # layer on GB10 with V4.1).
++        gate_first = (
++            _MOE_GATE_FIRST and self.gate is not None and not self._fse_fuse_gate
++        )
++        if gate_first:
++            router_logits, _ = self.gate(hidden_states)
++
+         # If using multi-stream overlap for shared experts, we must launch it
+         # before routed expert dispatch.
+         shared_experts_overlapping = False
+@@ -900,7 +913,7 @@
+         # If the Runner holds the gate, apply it after the stream sync,
+         # so it can run overlapped with the
+         # NOTE: in future PR, MoE runner will always hold the gate.
+-        if self.gate is not None:
++        if self.gate is not None and not gate_first:
+             if self._fse_fuse_gate:
+                 self._maybe_fuse_gate_weights()
+                 router_logits = dispatch_unquantized_gemm()(

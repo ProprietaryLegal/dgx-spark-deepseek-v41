@@ -1,0 +1,48 @@
+{
+ "cmd": "concurrent",
+ "base": "http://localhost:8000",
+ "model": "dsv41",
+ "unix": 1791746768.097651,
+ "result": [
+  {
+   "streams": 2,
+   "rep": 0,
+   "max_tokens": 256,
+   "total_tokens": 512,
+   "wall_s": 6.271123110993358,
+   "aggregate_tps": 81.64406772727162,
+   "per_stream_decode_tps": [
+    69.708,
+    41.893
+   ],
+   "per_stream_tokens": [
+    256,
+    256
+   ],
+   "ttft_s": [
+    0.527,
+    0.184
+   ]
+  },
+  {
+   "streams": 2,
+   "rep": 1,
+   "max_tokens": 256,
+   "total_tokens": 512,
+   "wall_s": 6.385309401004633,
+   "aggregate_tps": 80.18405496833786,
+   "per_stream_decode_tps": [
+    65.518,
+    43.783
+   ],
+   "per_stream_tokens": [
+    256,
+    256
+   ],
+   "ttft_s": [
+    0.278,
+    0.56
+   ]
+  }
+ ]
+}

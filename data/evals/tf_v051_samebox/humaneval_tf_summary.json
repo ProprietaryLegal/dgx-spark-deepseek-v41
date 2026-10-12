@@ -1,0 +1,10 @@
+{
+ "suite": "humaneval",
+ "serve": "tf",
+ "n": 164,
+ "base_pass@1": 0.9573170731707317,
+ "plus_pass@1": 0.9085365853658537,
+ "gen_errors": 0,
+ "truncated": 1,
+ "mean_completion_tokens": 481.719512195122
+}

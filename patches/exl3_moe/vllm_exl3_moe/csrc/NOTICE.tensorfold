@@ -1,0 +1,51 @@
+Parts of this plugin are adapted from TensorFold (bertholomus's fork, github.com/bertholomus/TensorFold, branch
+deepseek-v41-tp2) under the Apache License, Version 2.0 (the license text: LICENSE at the root of this repository):
+
+  csrc/exl3_l2pf.cu   the paced L2 prefetch kernel, from src/tensorfold/cuda/exl3/l2_prefetch.cu (commit f464b09e);
+                      our launcher and binding.
+  csrc/exl3_rdma.cu   the RDMA all-reduce: rings, flags, doorbell and CPU proxy from TensorFold's one-hop gather
+                      (src/tensorfold/cuda/rdma_gather.cu, v5); the fp32 rank-order sum and the vLLM hook (rdma.py) are ours.
+  l2pf.py             the prefetch points and their pacing follow TensorFold's design; the code is ours.
+  sparse_attn.py      the split-over-keys + ordered-merge structure follows TensorFold's DeepSeek-V4.1 sparse attention
+                      (_sparse_attn_part / _sparse_attn_merge); the kernels are ours.
+  csrc/exl3_smoe.cu   the shared expert as one more slot of the routed-expert launch is TensorFold's idea; the kernel is ours.
+
+Copied unchanged from the same branch at commit 90b68e06 (src/tensorfold/cuda/exl3/), TensorFold's EXL3 module (its
+decoders follow ExLlamaV3's EXL3 format, MIT, Copyright (c) 2025 Turboderp; see LICENSE.exllamav3):
+
+  csrc/tf_experts/experts.cpp, experts.cu, experts_cb0.cu, experts_cb1.cu, experts_cb2.cu, experts_grouped.cuh
+                      the grouped routed-expert kernels; the plugin uses their prompt-chunk path
+                      (VLLM_EXL3_MOE_TF_PROMPT=1, tf_prompt.py).
+  tf_experts.py       from src/tensorfold/cuda/exl3/experts.py; changed: _ext() builds csrc/tf_experts/ with the
+                      plugin's JIT loader (jit.load_dir), marked at the top of the file.
+
+TensorFold's NOTICE:
+
+  TensorFold
+  Copyright 2026 TensorFold contributors
+  https://github.com/ashhart/TensorFold
+
+TensorFold's code written before its 0.6.0 release keeps its MIT notice (TensorFold's LICENSES/MIT.txt), included
+here for any of the files above that carry such code:
+
+  MIT License
+
+  Copyright (c) 2026 TensorFold contributors
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.

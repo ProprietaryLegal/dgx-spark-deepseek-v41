@@ -1,0 +1,10 @@
+{
+ "suite": "mbpp",
+ "serve": "native",
+ "n": 378,
+ "base_pass@1": 0.91005291005291,
+ "plus_pass@1": 0.7751322751322751,
+ "gen_errors": 0,
+ "truncated": 3,
+ "mean_completion_tokens": 448.7275132275132
+}

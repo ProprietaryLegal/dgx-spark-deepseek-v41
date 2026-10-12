@@ -1,0 +1,2 @@
+[vllm.general_plugins]
+dsv41_testhooks = dsv41_testhooks:register

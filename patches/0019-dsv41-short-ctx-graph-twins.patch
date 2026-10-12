@@ -1,0 +1,229 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0018.
+Short-context CUDA graph twins for DeepSeek-V4.1's sparse indexer (VLLM_SHORT_CTX_BOUNDS="512,1025" for V4.1; off when
+unset). Below index_topk compressed entries the indexer selects every entry, and V4.1 already skips its scoring then
+(wq_b GEMM, logits, candidate masks, top-k: _fill_short_context_topk_indices), but only eagerly: inside a CUDA graph the
+branch is never taken, so every decode step scores. On 2x GB10 the 8 scoring layers cost +133 us each over a plain
+layer at k=5 (LOG Oct 11 06:27), ~1.2 ms a verify round, for contexts where the result is "all entries".
+With bounds set, each FULL decode graph of the target model gets a twin per bound, captured with the bound published
+(vllm/v1/worker/gpu/short_ctx.py), so the indexer takes its short branch in the layers whose ratio allows it
+(bound // compress_ratio <= index_topk); the runner sets the batch's longest sequence after the step (+ a margin,
+VLLM_SHORT_CTX_MARGIN, 16) before dispatch, and dispatch picks the smallest covering twin; batches with a prefill, or
+longer contexts, keep the normal graphs. The short branch selects the same entries in index order rather than score
+order, so attention sums them in a different order (rounding only).
+
+--- a/vllm/v1/worker/gpu/cudagraph_utils.py
++++ b/vllm/v1/worker/gpu/cudagraph_utils.py
+@@ -41,6 +41,7 @@
+ from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
+ from vllm.v1.worker.gpu.block_table import BlockTables
+ from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
++from vllm.v1.worker.gpu import short_ctx
+ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+ from vllm.v1.worker.gpu.model_states.interface import ModelState
+ from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
+@@ -75,6 +76,9 @@
+     num_active_loras: int = 0
+     # Number of microbatches the batch is split into (DBO). 1 means no splitting.
+     num_ubatches: int = 1
++    # Short-context twin (short_ctx.py): serves only batches whose longest sequence
++    # is at most this bound; None serves any context.
++    ctx_bound: int | None = None
+ 
+ 
+ def make_cudagraph_stats(
+@@ -108,6 +112,7 @@
+     num_active_loras: int,
+     max_query_len: int | None,
+     num_ubatches: int,
++    max_seq_len: int | None = None,
+ ) -> bool:
+     # desc.uniform_token_count=None (PIECEWISE) can handle any uniform_token_count
+     # desc.num_reqs=None means no request padding needed (PIECEWISE)
+@@ -127,6 +132,10 @@
+         and desc.num_tokens >= num_tokens
+         and desc.num_active_loras == num_active_loras
+         and desc.num_ubatches == num_ubatches
++        and (
++            desc.ctx_bound is None
++            or (max_seq_len is not None and max_seq_len <= desc.ctx_bound)
++        )
+     )
+ 
+ 
+@@ -140,6 +149,9 @@
+ 
+ 
+ class CudaGraphManager:
++    # Whether FULL uniform-decode graphs get short-context twins (short_ctx.py).
++    SHORT_CTX_TWINS = False
++
+     def __init__(
+         self,
+         vllm_config: VllmConfig,
+@@ -364,8 +376,32 @@
+                 if ubatch_desc is not None:
+                     descs_by_mode[mixed_mode].append(ubatch_desc)
+ 
++        if self.SHORT_CTX_TWINS and short_ctx.BOUNDS:
++            full = descs_by_mode.get(CUDAGraphMode.FULL, [])
++            twins = [
++                replace(d, ctx_bound=b)
++                for d in full
++                # decode graphs only: uniform (fixed tokens a request) or varlen decode
++                if (d.uniform_token_count is not None or d.max_query_len is not None)
++                and d.num_ubatches == 1
++                for b in short_ctx.BOUNDS
++            ]
++            full.extend(twins)
++            if twins:
++                logger.info(
++                    "Short-context CUDA graph twins: %d (bounds %s)",
++                    len(twins),
++                    short_ctx.BOUNDS,
++                )
++
++        def _order(d: BatchExecutionDescriptor) -> tuple[int, int]:
++            # Larger graphs first; within a size the unbounded graph first, so the
++            # reversed candidate order tries the smallest bound first.
++            bound = d.ctx_bound if d.ctx_bound is not None else 1 << 62
++            return (-d.num_tokens, -bound)
++
+         for mode, descs in descs_by_mode.items():
+-            descs.sort(key=lambda d: d.num_tokens, reverse=True)
++            descs.sort(key=_order)
+             self._capture_descs[mode] = descs
+ 
+         for mode in (CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE):
+@@ -451,6 +487,8 @@
+                 if is_global_first_rank():
+                     descs = tqdm(descs, desc=f"{progress_bar_desc} ({mode.name})")
+                 for desc in descs:
++                    # A short-context twin captures the model's short branch.
++                    short_ctx.set_capture_bound(desc.ctx_bound)
+                     # Prepare inputs and get forward function
+                     forward_fn = create_forward_fn(desc, warmup=True)
+ 
+@@ -503,6 +541,7 @@
+                             self._capture_mem_samples.append(free_before - free_after)
+                         self.graphs[desc] = graph
+                         compilation_counter.num_cudagraph_captured += 1
++                short_ctx.set_capture_bound(None)
+ 
+         self._graphs_captured = True
+ 
+@@ -534,6 +573,7 @@
+                     effective_loras,
+                     max_query_len,
+                     num_ubatches,
++                    short_ctx.dispatch_max_seq_len(),
+                 ):
+                     return desc
+         return BatchExecutionDescriptor(
+@@ -576,6 +616,8 @@
+ class ModelCudaGraphManager(CudaGraphManager):
+     """CudaGraphManager with model-specific capture and hidden state management."""
+ 
++    SHORT_CTX_TWINS = True
++
+     def __init__(
+         self,
+         vllm_config: VllmConfig,
+--- a/vllm/v1/worker/gpu/model_runner.py
++++ b/vllm/v1/worker/gpu/model_runner.py
+@@ -108,6 +108,7 @@
+     profile_cudagraph_memory as _profile_cudagraph_memory,
+ )
+ from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
++from vllm.v1.worker.gpu import short_ctx
+ from vllm.v1.worker.gpu.ec_connector import get_ec_connector
+ from vllm.v1.worker.gpu.eplb_utils import EPLBController, step_eplb_after
+ from vllm.v1.worker.gpu.input_batch import (
+@@ -1807,6 +1808,22 @@
+             # cross-attention cache with dynamic encoder outputs.
+             skip_compiled = True
+ 
++        if short_ctx.BOUNDS:
++            # Short-context twins (short_ctx.py): the batch's longest sequence after
++            # this step, plus a margin; unknown (no twin) with a prefill or a dummy.
++            max_seq_len = None
++            if batch_req_state is not None and not batch_req_state.has_prefill:
++                idx = batch_req_state.idx_mapping_np
++                max_seq_len = (
++                    int(
++                        (
++                            self.req_states.num_computed_tokens_np[idx]
++                            + batch_req_state.num_scheduled_tokens
++                        ).max()
++                    )
++                    + short_ctx.MARGIN
++                )
++            short_ctx.set_dispatch_max_seq_len(max_seq_len)
+         batch_desc, dp_sync = dispatch_cg_and_sync_dp(
+             self.cudagraph_manager,
+             num_reqs,
+--- a/vllm/models/deepseek_v41/attention.py
++++ b/vllm/models/deepseek_v41/attention.py
+@@ -1498,10 +1498,17 @@
+         attn_metadata = get_forward_context().attn_metadata
+         if isinstance(attn_metadata, dict):
+             indexer_metadata = cast(Any, attn_metadata[self.k_cache.prefix])
++            from vllm.v1.worker.gpu.short_ctx import capture_bound
++
++            # Eager: the batch's own length decides. Capturing: only a short-context
++            # twin (vllm/v1/worker/gpu/short_ctx.py) whose bound allows it.
++            capturing = torch.cuda.is_current_stream_capturing()
++            bound = capture_bound() if capturing else None
+             if (
+-                indexer_metadata.max_seq_len // self.compress_ratio <= self.topk_tokens
+-                and not torch.cuda.is_current_stream_capturing()
+-            ):
++                not capturing
++                and indexer_metadata.max_seq_len // self.compress_ratio
++                <= self.topk_tokens
++            ) or (bound is not None and bound // self.compress_ratio <= self.topk_tokens):
+                 # candidates num smaller than topk, every candidate is selected
+                 # but we still need to build k cache
+                 if self.owns_k:
+--- /dev/null
++++ b/vllm/v1/worker/gpu/short_ctx.py
+@@ -0,0 +1,40 @@
++# SPDX-License-Identifier: Apache-2.0
++"""Short-context CUDA graph twins (VLLM_SHORT_CTX_BOUNDS, "512,1025" for V4.1; off when unset).
++
++A model can skip work below a context length: DeepSeek-V4.1's sparse indexer selects every compressed entry when they
++number at most index_topk, so its scoring (a GEMM, logits, candidate masks, a top-k) is pointless there, and the model
++already takes that branch when it runs eagerly. Inside a CUDA graph keyed only by batch shape it cannot. With bounds
++set, each FULL uniform-decode graph of the target model gets one twin per bound, captured while capture_bound() returns
++that bound so the model takes its short branch wherever the bound allows it, and dispatch picks the smallest twin
++whose bound covers the batch's longest sequence (dispatch_max_seq_len(), set by the runner with MARGIN added).
++"""
++
++import os
++
++BOUNDS: list[int] = sorted(
++    {int(x) for x in os.environ.get("VLLM_SHORT_CTX_BOUNDS", "").replace(" ", "").split(",") if x}
++)
++MARGIN = int(os.environ.get("VLLM_SHORT_CTX_MARGIN", "16"))
++
++_capture_bound: int | None = None
++_dispatch_max_seq_len: int | None = None
++
++
++def capture_bound() -> int | None:
++    """The context bound of the graph being captured, or None (not a twin, or not capturing)."""
++    return _capture_bound
++
++
++def set_capture_bound(bound: int | None) -> None:
++    global _capture_bound
++    _capture_bound = bound
++
++
++def dispatch_max_seq_len() -> int | None:
++    """The longest sequence of the batch about to dispatch (+ MARGIN), or None when unknown (no twin then)."""
++    return _dispatch_max_seq_len
++
++
++def set_dispatch_max_seq_len(n: int | None) -> None:
++    global _dispatch_max_seq_len
++    _dispatch_max_seq_len = n

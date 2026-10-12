@@ -1,0 +1,8 @@
+# dsv41-serve: the serving image = dsv41-quant (vLLM main 6e517b15 for GB10 + patch series + exllamav3 1.6.0 for
+# sm_121) + the vllm_exl3_moe plugin (patches/exl3_moe, Apache-2.0), installed --no-deps so pip never touches torch.
+ARG BASE=dsv41-quant:dev
+FROM ${BASE}
+COPY wheels/ /tmp/wheels/
+RUN python3 -m pip install --no-deps /tmp/wheels/vllm_exl3_moe-*.whl && rm -rf /tmp/wheels && \
+    python3 -c "import importlib.metadata as m; eps = [e.name for e in m.entry_points(group='vllm.general_plugins')]; assert 'exl3_moe' in eps, eps; print('plugin entry point ok', eps)"
+LABEL org.opencontainers.image.title="dsv41-serve" org.opencontainers.image.description="dsv41-quant + vllm_exl3_moe plugin"

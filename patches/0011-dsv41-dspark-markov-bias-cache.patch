@@ -1,0 +1,278 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0008 + 0010.
+DSpark Markov bias rows cached for frequent tokens (VLLM_DSPARK_MARKOV_CACHE=<json token list>,
+VLLM_DSPARK_MARKOV_CACHE_ROWS, default 4096). V4.1's Markov bias depends only on the previous token
+(markov_w2 @ markov_w1[t]), and the full-vocab path reads the whole replicated 129,280 x 256 BF16 markov_w2 (66 MB) at
+every draft position (5 x 262 us = 1.38 ms a step at DSpark 5 on GB10). The rows of the listed tokens are computed at
+load and read back (258 KB a row); cached and computed rows come from the same Triton kernel, so a token's bias has the
+same bits either way. Same idea as TensorFold's V4.1 drafter (github.com/bertholomus/TensorFold, branch
+deepseek-v41-tp2, families/deepseek_v41/cuda/markov.py, Apache-2.0: 4096 rows); our implementation. Token list:
+data/dspark/markov_top_tokens.json (most frequent first, counted on our calibration set: top 4096 cover 79.7% of its
+tokens). Drafts can differ from the cuBLAS path's only where its rounding differs (acceptance noise, verification
+unchanged). Test: patches/tests/test_dspark_markov_cache.py.
+
+diff --git a/vllm/models/deepseek_v41/nvidia/dspark.py b/vllm/models/deepseek_v41/nvidia/dspark.py
+index 5d46a8b..79332c6 100644
+--- a/vllm/models/deepseek_v41/nvidia/dspark.py
++++ b/vllm/models/deepseek_v41/nvidia/dspark.py
+@@ -10,6 +10,7 @@ To implement non-causal attention, we leverage the sparse attention implementati
+ include the future query tokens in the top-k indices for each query token.
+ """
+ 
++import os
+ from collections.abc import Iterable
+ 
+ import regex as re
+@@ -307,6 +308,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
+             prefix=maybe_prefix(prefix, "lm_head"),
+         )
+         self.logits_processor = LogitsProcessor(self.config.vocab_size)
++        # Cached Markov bias rows (ops/markov_cache.py), built after loading when
++        # VLLM_DSPARK_MARKOV_CACHE names a token list.
++        self._markov_cache = None
+ 
+     # --- Hooks used by the speculator -------------------------------------
+ 
+@@ -357,6 +361,36 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
+     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
+         return self.model.markov_head.bias(markov_embed, self.logits_processor)
+ 
++    def markov_bias_for_ids(
++        self, token_ids: torch.Tensor, markov_embed: torch.Tensor
++    ) -> torch.Tensor:
++        """The Markov bias of the tokens ``token_ids`` (embedded as ``markov_embed``),
++        read from cached rows where the token has one."""
++        if self._markov_cache is None:
++            return self.markov_bias(markov_embed)
++        return self._markov_cache(token_ids, markov_embed)
++
++    def _maybe_build_markov_cache(self) -> None:
++        if not os.environ.get("VLLM_DSPARK_MARKOV_CACHE"):
++            return
++        from .ops.markov_cache import MarkovBiasCache
++
++        head = self.model.markov_head
++        w1, w2 = head.markov_w1.weight, head.markov_w2.weight
++        if w2.dim() != 2 or w2.dtype not in (torch.bfloat16, torch.float16):
++            logger.warning("DSpark Markov cache off: markov_w2 is %s", w2.dtype)
++            return
++        probe = torch.tensor([0, 1, 2, 3], dtype=torch.int64, device=w2.device)
++        ref = self.markov_bias(self.markov_embed(probe))
++        if ref.shape != (probe.numel(), w2.shape[0]):
++            logger.warning("DSpark Markov cache off: bias shape %s", tuple(ref.shape))
++            return
++        cache = MarkovBiasCache(w1, w2, ref.dtype)
++        got = cache(probe, self.markov_embed(probe))
++        err = (got.float() - ref.float()).abs().max() / ref.float().abs().max()
++        logger.info("DSpark Markov cache: max rel diff vs the GEMM path %.2e", err)
++        self._markov_cache = cache
++
+     def apply_markov_bias_gathered(
+         self,
+         markov_embed: torch.Tensor,
+@@ -507,6 +541,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
+         if self.model.confidence_head is not None and not loaded_confidence_head:
+             self.model.confidence_head = None
+         self.process_weights_after_loading()
++        self._maybe_build_markov_cache()
+         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
+         return loaded_params
+ 
+diff --git a/vllm/models/deepseek_v41/nvidia/ops/markov_cache.py b/vllm/models/deepseek_v41/nvidia/ops/markov_cache.py
+new file mode 100644
+index 0000000..76078f2
+--- /dev/null
++++ b/vllm/models/deepseek_v41/nvidia/ops/markov_cache.py
+@@ -0,0 +1,160 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""DSpark Markov bias with cached rows for frequent tokens (DeepSeek-V4.1).
++
++The Markov bias of a draft position depends only on the previous token:
++``bias(t) = markov_w2 @ markov_w1[t]``, a full-vocabulary row read through the
++whole replicated 129,280 x 256 projection (66 MB) at every draft position. Rows
++for the most frequent tokens are computed once at load and read back instead
++(258 KB a row). Cached and computed rows come from the same kernel, so a token's
++bias has the same bits either way. TensorFold's V4.1 drafter caches its bias rows
++the same way (github.com/bertholomus/TensorFold, branch deepseek-v41-tp2,
++src/tensorfold/families/deepseek_v41/cuda/markov.py, Apache-2.0); this is our
++implementation.
++
++VLLM_DSPARK_MARKOV_CACHE: a JSON list of token ids to cache (most frequent
++first); VLLM_DSPARK_MARKOV_CACHE_ROWS caps how many are used (default 4096).
++"""
++
++import json
++import os
++
++import torch
++
++from vllm.logger import init_logger
++from vllm.triton_utils import tl, triton
++
++logger = init_logger(__name__)
++
++_BLOCK_V = 64
++
++
++@triton.jit
++def _markov_bias_kernel(
++    ids_ptr,
++    slot_ptr,
++    cache_ptr,
++    emb_ptr,
++    w2_ptr,
++    out_ptr,
++    V,
++    cache_stride,
++    w2_stride,
++    emb_stride,
++    out_stride,
++    R: tl.constexpr,
++    BLOCK_V: tl.constexpr,
++):
++    b = tl.program_id(0)
++    cols = tl.program_id(1) * BLOCK_V + tl.arange(0, BLOCK_V)
++    mask = cols < V
++    tok = tl.load(ids_ptr + b).to(tl.int64)
++    slot = tl.load(slot_ptr + tok)
++    if slot >= 0:
++        row = tl.load(cache_ptr + slot.to(tl.int64) * cache_stride + cols, mask=mask)
++        tl.store(out_ptr + b * out_stride + cols, row, mask=mask)
++    else:
++        r = tl.arange(0, R)
++        e = tl.load(emb_ptr + b * emb_stride + r).to(tl.float32)
++        w = tl.load(
++            w2_ptr + cols[:, None].to(tl.int64) * w2_stride + r[None, :],
++            mask=mask[:, None],
++            other=0.0,
++        )
++        acc = tl.sum(w.to(tl.float32) * e[None, :], axis=1)
++        tl.store(
++            out_ptr + b * out_stride + cols,
++            acc.to(out_ptr.dtype.element_ty),
++            mask=mask,
++        )
++
++
++def markov_bias_rows(
++    token_ids: torch.Tensor,
++    slot_of_token: torch.Tensor,
++    cache: torch.Tensor,
++    markov_embed: torch.Tensor,
++    w2: torch.Tensor,
++    out: torch.Tensor,
++) -> torch.Tensor:
++    """out[b] = cache[slot_of_token[t_b]] if cached, else w2 @ markov_embed[b]."""
++    num_rows, rank = markov_embed.shape
++    vocab = w2.shape[0]
++    assert w2.stride(1) == 1 and markov_embed.stride(1) == 1 and out.stride(1) == 1
++    if num_rows == 0:
++        return out
++    grid = (num_rows, triton.cdiv(vocab, _BLOCK_V))
++    _markov_bias_kernel[grid](
++        token_ids,
++        slot_of_token,
++        cache,
++        markov_embed,
++        w2,
++        out,
++        vocab,
++        cache.stride(0),
++        w2.stride(0),
++        markov_embed.stride(0),
++        out.stride(0),
++        R=rank,
++        BLOCK_V=_BLOCK_V,
++        num_warps=4,
++    )
++    return out
++
++
++class MarkovBiasCache:
++    """Cached Markov bias rows for the tokens listed in VLLM_DSPARK_MARKOV_CACHE."""
++
++    def __init__(self, w1: torch.Tensor, w2: torch.Tensor, out_dtype: torch.dtype):
++        path = os.environ["VLLM_DSPARK_MARKOV_CACHE"]
++        rows = int(os.environ.get("VLLM_DSPARK_MARKOV_CACHE_ROWS") or 4096)
++        with open(path) as f:
++            ids = [int(t) for t in json.load(f)]
++        vocab, rank = w2.shape
++        seen: set[int] = set()
++        ids = [t for t in ids if 0 <= t < vocab and not (t in seen or seen.add(t))]
++        ids = ids[:rows]
++        dev = w2.device
++        self.w2 = w2
++        self.out_dtype = out_dtype
++        self.slot_of_token = torch.full((vocab,), -1, dtype=torch.int32, device=dev)
++        self.cache = torch.empty((len(ids), vocab), dtype=out_dtype, device=dev)
++        if ids:
++            tok = torch.tensor(ids, dtype=torch.int64, device=dev)
++            # The rows come from the same kernel as uncached tokens (all slots -1
++            # while filling), so a token's bias has the same bits either way.
++            for s in range(0, len(ids), 256):
++                t = tok[s : s + 256]
++                markov_bias_rows(
++                    t,
++                    self.slot_of_token,
++                    self.cache,
++                    w1[t].contiguous(),
++                    w2,
++                    self.cache[s : s + 256],
++                )
++            self.slot_of_token[tok] = torch.arange(
++                len(ids), dtype=torch.int32, device=dev
++            )
++        logger.info(
++            "DSpark Markov bias: %d cached rows (%.2f GiB) from %s",
++            len(ids),
++            self.cache.numel() * self.cache.element_size() / 2**30,
++            path,
++        )
++
++    def __call__(self, token_ids: torch.Tensor, markov_embed: torch.Tensor):
++        out = torch.empty(
++            (markov_embed.shape[0], self.w2.shape[0]),
++            dtype=self.out_dtype,
++            device=markov_embed.device,
++        )
++        return markov_bias_rows(
++            token_ids,
++            self.slot_of_token,
++            self.cache,
++            markov_embed.contiguous(),
++            self.w2,
++            out,
++        )
+diff --git a/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py b/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py
+index a0ac116..1237560 100644
+--- a/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py
++++ b/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py
+@@ -81,6 +81,8 @@ class DSparkSpeculator(DFlashSpeculator):
+         )
+ 
+         self.use_confidence_head: bool = False
++        # The model reads cached Markov bias rows by token id when it has them.
++        self._markov_by_ids: bool = False
+ 
+     def load_draft_model(
+         self,
+@@ -112,6 +114,7 @@ class DSparkSpeculator(DFlashSpeculator):
+             # The acceptance estimator is not needed when a trained confidence head
+             # is available.
+             self.use_acceptance_estimator = False
++        self._markov_by_ids = hasattr(model, "markov_bias_for_ids")
+         return model
+ 
+     def _sample_logits(
+@@ -182,7 +185,10 @@ class DSparkSpeculator(DFlashSpeculator):
+             markov_embed = self.model.markov_embed(prev)
+             if self.use_confidence_head:
+                 confidence_markov_embeds.append(markov_embed)
+-            bias = self.model.markov_bias(markov_embed)
++            if self._markov_by_ids:
++                bias = self.model.markov_bias_for_ids(prev, markov_embed)
++            else:
++                bias = self.model.markov_bias(markov_embed)
+             logits_i = base_logits[:, i] + bias
+             draft_sampled_i = self._sample_logits(
+                 logits_i, idx_map[:, i], sample_pos[:, i], i

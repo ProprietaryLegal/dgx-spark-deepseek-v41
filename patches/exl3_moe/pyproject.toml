@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-exl3-moe"
+version = "0.1.0.dev0"
+description = "vLLM plugin: EXL3 trellis routed experts (exllamav3 kernels) for DeepSeek-V4.1-Flash"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+readme = "README.md"
+# vLLM (main @ 6e517b15) and exllamav3 (v1.6.0, built for sm_121) come from the runtime image,
+# pinned there; install this package with --no-deps so pip never re-resolves them.
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest", "numpy"]
+
+[project.entry-points."vllm.general_plugins"]
+exl3_moe = "vllm_exl3_moe:register"
+
+[tool.setuptools]
+packages = ["vllm_exl3_moe"]
+
+[tool.setuptools.package-data]
+# the CUDA sources compile on first use (jit.py); exllamav3's MIT notice and TensorFold's NOTICE ship with them
+vllm_exl3_moe = ["csrc/*.cu", "csrc/*.cuh", "csrc/*.h", "csrc/LICENSE.exllamav3", "csrc/NOTICE.tensorfold",
+                 "csrc/tf_experts/*.cu", "csrc/tf_experts/*.cuh", "csrc/tf_experts/*.cpp",
+                 "csrc/tf_shim/ATen/cuda/*.h"]

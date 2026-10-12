@@ -1,0 +1,10 @@
+{
+ "suite": "humaneval",
+ "serve": "native",
+ "n": 164,
+ "base_pass@1": 0.975609756097561,
+ "plus_pass@1": 0.9207317073170732,
+ "gen_errors": 0,
+ "truncated": 1,
+ "mean_completion_tokens": 552.530487804878
+}

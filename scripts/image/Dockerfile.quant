@@ -1,0 +1,10 @@
+# dsv41-quant: the P4 harness image = dsv41-recipe (vLLM main 6e517b15 for GB10 + patches, TileLang for DeepSeek's
+# reference kernels) + exllamav3 v1.6.0 built for sm_121 (MIT, turboderp-org; its quantizer and kernels).
+ARG BASE=dsv41-recipe:dev
+FROM ${BASE}
+COPY wheels/ /tmp/wheels/
+RUN python3 -m pip install --no-deps /tmp/wheels/exllamav3-1.6.0-*.whl && rm -rf /tmp/wheels && \
+    missing=$(python3 -c "import importlib.util as u; print(' '.join(m for m in ('marisa_trie', 'llguidance', 'pydantic', 'rich', 'yaml') if u.find_spec(m) is None))") && \
+    if [ -n "$missing" ]; then python3 -m pip install $(echo $missing | sed 's/yaml/pyyaml/; s/marisa_trie/marisa-trie/'); fi && \
+    python3 -c "import torch, exllamav3_ext; from exllamav3.modules.quant.exl3_lib.quantize import quantize_exl3_batch; from exllamav3.modules.quant.exl3 import LinearEXL3; print('exllamav3 quantizer ok')"
+LABEL org.opencontainers.image.title="dsv41-quant" org.opencontainers.image.description="dsv41-recipe + exllamav3 1.6.0 (sm_121) for the P4 quantization harness"

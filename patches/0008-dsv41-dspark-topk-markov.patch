@@ -1,0 +1,53 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0007.
+DSpark top-k Markov bias for DeepSeek-V4.1: speculative-config `dspark_draft_topk` (vLLM's existing path for Qwen3 DSpark)
+now accepts the V4.1 drafter (DSparkV41DraftModel), and DSparkDeepseekV4ForCausalLM gains apply_markov_bias_gathered,
+delegating to the shared DSparkMarkovHead.apply_bias_gathered. V4.1's markov_w2 is a replicated 129,280 x 256 BF16
+projection read once per draft position on every rank (GB10 TP=2 trace: 5 calls x 262 us = 1.38 ms per decode step at
+DSpark 5); with dspark_draft_topk=K the bias is applied to the K best base-logit candidates only (K gathered rows).
+Opt-in; drafts can differ from the full-vocab argmax when the true argmax is outside the base top-K, which only
+moves acceptance (verification is unchanged). Test: patches/tests/test_dspark_topk_markov.py.
+
+diff --git a/vllm/config/speculative.py b/vllm/config/speculative.py
+index ff4f761..ef60475 100644
+--- a/vllm/config/speculative.py
++++ b/vllm/config/speculative.py
+@@ -1526,10 +1526,13 @@ class SpeculativeConfig:
+                             not in self.draft_model_config.architectures
+                             and _QWEN3_OMNI_DSPARK_ARCHITECTURE
+                             not in self.draft_model_config.architectures
++                            and "DSparkV41DraftModel"
++                            not in self.draft_model_config.architectures
+                         ):
+                             raise ValueError(
+                                 "dspark_draft_topk is only supported by "
+-                                "Qwen3DSparkModel and Qwen3OmniDSparkModel"
++                                "Qwen3DSparkModel, Qwen3OmniDSparkModel and "
++                                "DSparkV41DraftModel"
+                             )
+                         hf_config.dspark_draft_topk = dspark_draft_topk
+ 
+diff --git a/vllm/models/deepseek_v41/nvidia/dspark.py b/vllm/models/deepseek_v41/nvidia/dspark.py
+index d1534d5..5d46a8b 100644
+--- a/vllm/models/deepseek_v41/nvidia/dspark.py
++++ b/vllm/models/deepseek_v41/nvidia/dspark.py
+@@ -357,6 +357,20 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
+     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
+         return self.model.markov_head.bias(markov_embed, self.logits_processor)
+ 
++    def apply_markov_bias_gathered(
++        self,
++        markov_embed: torch.Tensor,
++        logits: torch.Tensor,
++        values: torch.Tensor,
++        index: torch.Tensor,
++    ) -> torch.Tensor:
++        # dspark_draft_topk: the Markov bias for the top-k base-logit candidates
++        # only, a few gathered rows of the replicated vocab x rank projection per
++        # draft position instead of the whole of it.
++        return self.model.markov_head.apply_bias_gathered(
++            markov_embed, logits, values, index
++        )
++
+     def compute_confidence(
+         self, head_hidden: torch.Tensor, markov_embed: torch.Tensor
+     ) -> torch.Tensor:

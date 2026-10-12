@@ -1,0 +1,25 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0016.
+A hook for an out-of-tree quant plugin's L2 prefetch: after DeepseekV41LLMForCausalLM loads its weights, it hands the
+model to vllm_exl3_moe.l2pf.register_decoder_layers when that plugin is installed, so the plugin can register per-layer
+tensors it prefetches into L2 at its decode-time points (the fp32 mHC mix weights hc_attn_fn / hc_ffn_fn, 1.9 MiB each,
+and the bf16 router gate, 3.75 MiB, with EXL3_L2PF_HC=1). Without the plugin, or with its prefetch off, nothing changes.
+(V4.1 has its own model class in deepseek_v41/nvidia/model.py; V4's process_weights_after_loading is not on its path.)
+
+--- a/vllm/models/deepseek_v41/nvidia/model.py
++++ b/vllm/models/deepseek_v41/nvidia/model.py
+@@ -1651,6 +1651,15 @@
+         self.model.finalize_mega_moe_weights()
+         self.model.finalize_mhc_broadcast_weights()
+         self.model.finalize_mega_attn_weights()
++        # An out-of-tree quant plugin may prefetch per-layer weights into L2
++        # (vllm_exl3_moe: the mHC mix weights and router gates); a no-op
++        # unless that plugin is installed and its prefetch is switched on.
++        try:
++            from vllm_exl3_moe.l2pf import register_decoder_layers
++        except ImportError:
++            register_decoder_layers = None
++        if register_decoder_layers is not None:
++            register_decoder_layers(self.model)
+ 
+     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+         return self.model.get_expert_mapping()

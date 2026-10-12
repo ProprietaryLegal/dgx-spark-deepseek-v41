@@ -1,0 +1,24 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0004.
+DeepSeek-V4.1: hand the model's quant config to its lm_head (ParallelLMHead), so a quantization plugin can quantize the
+head. A no-op for the checkpoint's own FP8 config: Fp8Config.get_quant_method returns no method for embeddings and the
+head stays UnquantizedEmbeddingMethod. The recipe's vllm_exl3_moe plugin uses it for an opt-in MXFP8 head through Marlin:
+the BF16 head reads 0.66 GB per forward per rank at TP=2, and the DSpark drafter shares the module, so a decode step pays
+it twice.
+
+diff --git a/vllm/models/deepseek_v41/nvidia/model.py b/vllm/models/deepseek_v41/nvidia/model.py
+index bd91e8f..bec0353 100644
+--- a/vllm/models/deepseek_v41/nvidia/model.py
++++ b/vllm/models/deepseek_v41/nvidia/model.py
+@@ -1525,9 +1525,12 @@ class DeepseekV41LLMForCausalLM(
+             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+         )
+         if get_pp_group().is_last_rank:
++            # The quant config may quantize the head (a no-op for the checkpoint's own FP8 config, which
++            # hands embeddings no method). The DSpark drafter shares this module, so it reads the same head.
+             self.lm_head = ParallelLMHead(
+                 config.vocab_size,
+                 config.hidden_size,
++                quant_config=vllm_config.quant_config,
+                 prefix=maybe_prefix(prefix, "lm_head"),
+             )
+         else:

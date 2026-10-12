@@ -1,0 +1,12 @@
+# Serve image as an overlay on an existing dsv41-serve image (patches 0001-0005 already in site-packages): applies the
+# later python-only patches and installs the plugin from source. For a box without the vLLM wheel (the canonical chain is
+# build_image.sh -> build_quant_image.sh -> build_serve_image.sh, from the wheel). Writes a few MB, no 25 GB image copy.
+ARG BASE=dsv41-serve:dev
+FROM ${BASE}
+COPY patches/ /opt/dsv41/patches-overlay/
+COPY plugin/ /tmp/plugin/
+RUN SITE=$(python3 -c "import vllm, os; print(os.path.dirname(os.path.dirname(vllm.__file__)))") && cd "$SITE" && \
+    for p in /opt/dsv41/patches-overlay/*.patch; do git apply --verbose --include='vllm/*' -p1 "$p" || exit 1; done && \
+    cp /opt/dsv41/patches-overlay/*.patch /opt/dsv41/patches/ && \
+    cd /tmp/plugin && python3 -m pip install --no-deps --no-build-isolation --force-reinstall . && cd / && rm -rf /tmp/plugin && \
+    python3 -c "import vllm_exl3_moe.dense, vllm_exl3_moe.head; from vllm.models.deepseek_v41.nvidia.model import HEAD_PIECES; print('overlay ok', HEAD_PIECES)"

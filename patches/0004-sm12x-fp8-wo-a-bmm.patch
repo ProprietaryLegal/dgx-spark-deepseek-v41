@@ -1,0 +1,191 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0003.
+DeepSeek-V4.1 wo_a on SM12x (GB10): DeepGEMM's MXFP8 bmm and fp8_einsum are datacenter-Blackwell only, so wo_a fell back to
+EmulationMxfp8LinearKernel (BF16 dequant at load + BF16 bmm: 2x the bytes and the memory). Sm12xMarlinMxfp8BmmLinearKernel
+keeps the FP8 weight, Marlin-packs each group once at load and runs one Marlin MXFP8 (W8A16) GEMM per group: 21.4 us per
+1024x4096 group at m=1, ~203 GB/s, vs 65.8 us (~66 GB/s) for the CUTLASS MXFP8 GEMM, distinct weights cycled from DRAM
+(scripts/bench/linear_dram_bench.py, idle GB10). deep_gemm_fp8_o_proj routes to it after the inverse RoPE.
+Test: patches/tests/test_sm12x_mxfp8_bmm.py.
+
+diff --git a/vllm/model_executor/kernels/linear/__init__.py b/vllm/model_executor/kernels/linear/__init__.py
+index e5fed78..661b60c 100644
+--- a/vllm/model_executor/kernels/linear/__init__.py
++++ b/vllm/model_executor/kernels/linear/__init__.py
+@@ -112,6 +112,9 @@ from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
+ from vllm.model_executor.kernels.linear.mxfp8.emulation import (
+     EmulationMxfp8LinearKernel,
+ )
++from vllm.model_executor.kernels.linear.mxfp8.sm12x_bmm import (
++    Sm12xMarlinMxfp8BmmLinearKernel,
++)
+ from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+     FlashInferCutedslMxfp8LinearKernel,
+     FlashInferCutlassMxfp8LinearKernel,
+@@ -894,7 +897,11 @@ def init_mxfp8_linear_kernel(
+     possible: list[type[Mxfp8LinearKernel]]
+     if bmm_batch_size is not None:
+         possible = (
+-            [DeepGemmMxfp8BmmLinearKernel, EmulationMxfp8LinearKernel]
++            [
++                DeepGemmMxfp8BmmLinearKernel,
++                Sm12xMarlinMxfp8BmmLinearKernel,
++                EmulationMxfp8LinearKernel,
++            ]
+             if current_platform.is_cuda()
+             else []
+         )
+diff --git a/vllm/model_executor/kernels/linear/mxfp8/sm12x_bmm.py b/vllm/model_executor/kernels/linear/mxfp8/sm12x_bmm.py
+new file mode 100644
+index 0000000..b234902
+--- /dev/null
++++ b/vllm/model_executor/kernels/linear/mxfp8/sm12x_bmm.py
+@@ -0,0 +1,115 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Grouped MXFP8 projection on SM12x (GB10, RTX 50xx): DeepSeek-V4.1's wo_a.
++
++DeepGEMM's MXFP8 bmm only runs on datacenter Blackwell, so on SM12x wo_a fell back to EmulationMxfp8LinearKernel, which
++dequantizes the weight to BF16 once at load and runs a BF16 bmm: twice the bytes and memory, and cuBLAS BF16 at one row
++is slow on GB10 (137 us per 1024 x 4096 group at m=1, measured). This kernel keeps the FP8 weight and runs one Marlin
++MXFP8 (W8A16) GEMM per group, 26 us per group at m=1 on GB10 (the CUTLASS MXFP8 GEMM is 151 us there).
++deep_gemm_fp8_o_proj routes to it when wo_a carries `sm12x_bmm_groups`.
++"""
++
++import torch
++from torch.nn.parameter import Parameter
++
++from vllm.model_executor.layers.quantization.utils.mxfp8_utils import MXFP8_BLOCK_SIZE
++from vllm.platforms import current_platform
++
++from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
++
++
++def _group_shape(c: Mxfp8LinearLayerConfig) -> tuple[int, int, int]:
++    rows, k = c.weight_shape
++    g = c.bmm_batch_size or 0
++    return g, (rows // g if g and rows % g == 0 else 0), k
++
++
++class Sm12xMarlinMxfp8BmmLinearKernel(Mxfp8LinearKernel):
++    """MXFP8 bmm as one Marlin MXFP8 (W8A16) GEMM per group (SM12x)."""
++
++    supports_pre_processed_weights = False
++
++    @classmethod
++    def is_supported(
++        cls, compute_capability: int | None = None
++    ) -> tuple[bool, str | None]:
++        from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
++            is_fp8_marlin_supported,
++        )
++
++        if not (
++            current_platform.is_cuda()
++            and current_platform.is_device_capability_family(120)
++        ):
++            return False, "SM12x only (datacenter Blackwell uses DeepGEMM's bmm)"
++        if not is_fp8_marlin_supported():
++            return False, "Marlin FP8 not available"
++        return True, None
++
++    @classmethod
++    def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
++        g, n, k = _group_shape(c)
++        if g <= 0 or n <= 0:
++            return False, "bmm with rows divisible by the batch size only"
++        if k % MXFP8_BLOCK_SIZE != 0:
++            return False, f"Marlin MXFP8 needs K % {MXFP8_BLOCK_SIZE} == 0, got K={k}"
++        return True, None
++
++    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
++        from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
++            prepare_mxfp8_layer_for_marlin,
++        )
++
++        weight = layer.weight.data  # [G * N, K] fp8
++        g = self.config.bmm_batch_size
++        rows, k = weight.shape
++        n = rows // g
++        scale = layer.weight_scale.data[:rows, : k // MXFP8_BLOCK_SIZE]
++        packed, scales = [], []
++        for i in range(g):
++            holder = torch.nn.Module()
++            holder.weight = Parameter(weight[i * n : (i + 1) * n].contiguous(), requires_grad=False)
++            holder.weight_scale = Parameter(scale[i * n : (i + 1) * n].contiguous(), requires_grad=False)
++            holder.output_size_per_partition, holder.input_size_per_partition = n, k
++            prepare_mxfp8_layer_for_marlin(holder)
++            packed.append(holder.weight.data)
++            scales.append(holder.weight_scale.data)
++        layer.weight = Parameter(torch.stack(packed), requires_grad=False)
++        layer.weight_scale = Parameter(torch.stack(scales), requires_grad=False)
++        layer.sm12x_bmm_groups = g
++        layer.sm12x_bmm_nk = (n, k)
++
++    def apply_weights(
++        self,
++        layer: torch.nn.Module,
++        x: torch.Tensor,
++        bias: torch.Tensor | None = None,
++    ) -> torch.Tensor:
++        """[tokens, groups, K] -> [tokens, groups, N]."""
++        n, k = layer.sm12x_bmm_nk
++        out = sm12x_marlin_bmm(x, layer.weight, layer.weight_scale, layer.sm12x_bmm_groups, n, k)
++        if bias is not None:
++            out = out + bias.view(out.shape[1:])
++        return out
++
++
++def sm12x_marlin_bmm(
++    x: torch.Tensor, weight: torch.Tensor, scales: torch.Tensor, groups: int, n: int, k: int
++) -> torch.Tensor:
++    from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
++        apply_mxfp8_marlin_linear,
++    )
++
++    tokens, g, _ = x.shape
++    assert g == groups, (g, groups)
++    out = torch.empty((tokens, groups, n), dtype=x.dtype, device=x.device)
++    for i in range(groups):
++        out[:, i, :] = apply_mxfp8_marlin_linear(
++            input=x[:, i, :].contiguous(),
++            weight=weight[i],
++            weight_scale=scales[i],
++            workspace=None,
++            size_n=n,
++            size_k=k,
++        )
++    return out
+diff --git a/vllm/models/deepseek_v4/nvidia/ops/o_proj.py b/vllm/models/deepseek_v4/nvidia/ops/o_proj.py
+index 1da4ab0..a649f8a 100644
+--- a/vllm/models/deepseek_v4/nvidia/ops/o_proj.py
++++ b/vllm/models/deepseek_v4/nvidia/ops/o_proj.py
+@@ -58,6 +58,30 @@ def deep_gemm_fp8_o_proj(
+     kernel, one ``wo_a`` group per slot with the live groups first, so only
+     the padding groups are sliced off.
+     """
++    if getattr(wo_a, "sm12x_bmm_groups", None) and not isinstance(
++        o, QuantizedActivation
++    ):
++        # SM12x: FP8 wo_a through one Marlin MXFP8 GEMM per group (DeepGEMM's
++        # fp8_einsum is datacenter-Blackwell only; the weight is Marlin-packed).
++        from vllm.model_executor.kernels.linear.mxfp8.sm12x_bmm import (
++            sm12x_marlin_bmm,
++        )
++
++        o_rot, _ = fused_inv_rope_fp8_quant(
++            o,
++            positions,
++            cos_sin_cache,
++            n_groups=n_groups,
++            heads_per_group=heads_per_group,
++            nope_dim=nope_dim,
++            rope_dim=rope_dim,
++            quant_group_size=einsum_recipe[2],
++            tma_aligned_scales=tma_aligned_scales,
++            quantize=False,
++        )
++        n, k = wo_a.sm12x_bmm_nk
++        z = sm12x_marlin_bmm(o_rot, wo_a.weight, wo_a.weight_scale, n_groups, n, k)
++        return wo_b(z.flatten(1))
+     use_fp8 = wo_a.weight.dtype == torch.float8_e4m3fn
+     if isinstance(o, QuantizedActivation):
+         assert use_fp8

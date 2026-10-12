@@ -1,0 +1,336 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0008.
+FULL cudagraphs with eager tensor-parallel all-reduces (VLLM_FULL_GRAPH_EAGER_ALLREDUCE=1, default off): the V2 GPU
+runner's FULL capture (CudaGraphManager.capture, the target model and the speculator alike) goes through
+BreakableCUDAGraphCapture(allreduce_only=True), and GroupCoordinator._all_reduce_out_place, while such a capture is
+open, ends the segment, runs the all-reduce eagerly with PyNccl into a graph-pool output buffer, records it for replay
+and resumes capture (eager_all_reduce_break). Only the plain PyNccl path breaks; custom / symmetric-memory / FlashInfer
+all-reduces stay captured. Ops decorated with eager_break_during_capture (active in this build: attention, the sparse
+indexer) stay in the graph, since a FULL replay runs eager segments without a forward context; the exception is the
+new eager_in_full_graph marker, set on DeepSeek-V4.1 Engram's prefetch start / finish, which fork and join the
+prefetch side stream across segments (a capture segment cannot end with unjoined side-stream work) and need no
+forward context. V4.1's mHC coefficient overlap (sm_100 only) keeps its side stream across the attention all-reduce,
+so it is off under the flag. maybe_execute_in_parallel /
+execute_in_parallel keep their aux-stream overlap in these captures (they fork and join inside one segment;
+all-reduces issued inside them stay captured). Only the target model's graphs split (the speculator's small
+forwards would turn launch-bound). Why: 2x DGX Spark, TP=2 over RoCE: a decode-size all-reduce costs 50-160 us inside a
+CUDA graph vs 26-42 us eager, ~96 of them per DSpark-3 decode step; PIECEWISE graphs (attention eager too) cost 19%
+end to end, so only the all-reduces may leave the graph.
+
+diff --git a/vllm/compilation/breakable_cudagraph.py b/vllm/compilation/breakable_cudagraph.py
+--- a/vllm/compilation/breakable_cudagraph.py
++++ b/vllm/compilation/breakable_cudagraph.py
+@@ -22,10 +22,12 @@
+ 
+ from __future__ import annotations
+ 
++import contextlib
+ import dataclasses
+ import functools
+ import gc
+ import logging
++import os
+ import threading
+ import weakref
+ from collections.abc import Callable
+@@ -55,6 +57,12 @@
+     return bool(envs.VLLM_USE_BREAKABLE_CUDAGRAPH)
+ 
+ 
++def is_full_graph_eager_allreduce_enabled() -> bool:
++    """VLLM_FULL_GRAPH_EAGER_ALLREDUCE=1: FULL cudagraphs are captured as segments split only at the
++    tensor-parallel all-reduces, which run eagerly between them (see eager_all_reduce_break)."""
++    return os.environ.get("VLLM_FULL_GRAPH_EAGER_ALLREDUCE", "0") == "1"
++
++
+ F = TypeVar("F", bound=Callable[..., Any])
+ 
+ 
+@@ -105,6 +113,10 @@
+             return fn(*args, **kwargs)
+         if not capture._capturing:
+             return fn(*args, **kwargs)
++        if capture.allreduce_only and not getattr(fn, "_eager_in_full_graph", False):
++            # FULL capture split at the all-reduces only: this op stays in the graph
++            # (unless marked with eager_in_full_graph)
++            return fn(*args, **kwargs)
+         if is_forward_context_available():
+             mode = get_forward_context().cudagraph_runtime_mode
+             if mode == CUDAGraphMode.FULL:
+@@ -120,6 +132,16 @@
+     return wrapper  # type: ignore[return-value]
+ 
+ 
++def eager_in_full_graph(fn: F) -> F:
++    """Mark an ``eager_break_during_capture`` op that must stay an eager break in
++    FULL captures split at the all-reduces (VLLM_FULL_GRAPH_EAGER_ALLREDUCE=1) too:
++    one that forks or joins a side stream across graph segments (a capture segment
++    cannot end with unjoined side-stream work) and needs no forward context at
++    replay. Apply it under (inside) ``@eager_break_during_capture``."""
++    fn._eager_in_full_graph = True  # type: ignore[attr-defined]
++    return fn
++
++
+ # ---------------------------------------------------------------------------
+ # Capture context
+ # ---------------------------------------------------------------------------
+@@ -150,8 +172,11 @@
+     def is_active(cls) -> bool:
+         return cls.current() is not None
+ 
+-    def __init__(self, pool: Any | None = None) -> None:
++    def __init__(self, pool: Any | None = None, allreduce_only: bool = False) -> None:
+         self.pool = pool
++        # True for FULL graphs split only at tensor-parallel all-reduces (eager_all_reduce_break):
++        # eager_break_during_capture ops are captured as usual
++        self.allreduce_only = allreduce_only
+         self.segments: list[Callable[[], Any]] = []
+         self._num_graphs: int = 0
+         self._num_eager_breaks: int = 0
+@@ -233,6 +258,52 @@
+         )
+ 
+ 
++_no_allreduce_break = threading.local()
++
++
++@contextlib.contextmanager
++def no_allreduce_break():
++    """All-reduces issued inside stay in the graph: a region where side streams
++    are forked (maybe_execute_in_parallel / execute_in_parallel) cannot end a
++    capture segment."""
++    depth = getattr(_no_allreduce_break, "depth", 0)
++    _no_allreduce_break.depth = depth + 1
++    try:
++        yield
++    finally:
++        _no_allreduce_break.depth = depth
++
++
++def eager_all_reduce_break(device_communicator: Any, input_: torch.Tensor) -> torch.Tensor | None:
++    """Inside a FULL capture made with BreakableCUDAGraphCapture (VLLM_FULL_GRAPH_EAGER_ALLREDUCE=1): end the current
++    segment, run this all-reduce eagerly with PyNccl into an output buffer from the graph pool, record it for replay
++    and start the next segment. Returns that buffer; None when no such capture is active or the all-reduce would not
++    take the plain PyNccl path (custom / quick / symmetric-memory / FlashInfer all-reduces stay inside the graph).
++
++    Why: with multi-node tensor parallelism over RoCE, a decode-size NCCL all-reduce captured inside a CUDA graph
++    cost 50-160 us against 26-42 us eager (2x DGX Spark, no NCCL setting changed that), while attention and every
++    other op of the step keep the full-graph replay."""
++    if not is_full_graph_eager_allreduce_enabled():
++        return None
++    cap = BreakableCUDAGraphCapture.current()
++    if cap is None or not cap._capturing or not cap.allreduce_only:
++        return None
++    if getattr(_no_allreduce_break, "depth", 0):
++        return None
++    pynccl = getattr(device_communicator, "pynccl_comm", None)
++    if pynccl is None or pynccl.disabled or not input_.is_contiguous():
++        return None
++    for name in ("ca_comm", "qr_comm", "fi_ar_comm", "fi_pcie_ipc_ar_comm", "aiter_ar_comm", "symm_mem_comm"):
++        comm = getattr(device_communicator, name, None)
++        if comm is not None and not getattr(comm, "disabled", False):
++            return None
++    out = torch.empty_like(input_)
++    inp_w, out_w = weak_ref_tensor(input_), weak_ref_tensor(out)
++    logger.info_once("FULL cudagraph: tensor-parallel all-reduces run eagerly between graph segments")
++    cap.add_eager(lambda: pynccl.all_reduce(inp_w, out_w))
++    return out
++
++
+ # ---------------------------------------------------------------------------
+ # Wrapper that mirrors CUDAGraphWrapper's interface
+ # ---------------------------------------------------------------------------
+diff --git a/vllm/distributed/parallel_state.py b/vllm/distributed/parallel_state.py
+--- a/vllm/distributed/parallel_state.py
++++ b/vllm/distributed/parallel_state.py
+@@ -745,6 +745,11 @@
+     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
+         if self.device_communicator is None:
+             raise ValueError("No device communicator found")
++        from vllm.compilation.breakable_cudagraph import eager_all_reduce_break
++
++        out = eager_all_reduce_break(self.device_communicator, input_)
++        if out is not None:
++            return out
+         return self.device_communicator.all_reduce(input_)
+ 
+     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+diff --git a/vllm/utils/multi_stream_utils.py b/vllm/utils/multi_stream_utils.py
+--- a/vllm/utils/multi_stream_utils.py
++++ b/vllm/utils/multi_stream_utils.py
+@@ -46,16 +46,22 @@
+     if aux_stream is not None:
+         from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+ 
+-        if BreakableCUDAGraphCapture.is_active():
++        capture = BreakableCUDAGraphCapture.current()
++        # A FULL capture split only at the all-reduces keeps the overlap: the
++        # fork and join below stay inside one segment.
++        if capture is not None and not capture.allreduce_only:
+             aux_stream = None
+ 
+     if aux_stream is not None:
++        from vllm.compilation.breakable_cudagraph import no_allreduce_break
++
+         event0.record()
+-        result0 = fn0()
+-        with torch.cuda.stream(aux_stream):
+-            event0.wait()
+-            result1 = fn1()
+-            event1.record()
++        with no_allreduce_break():
++            result0 = fn0()
++            with torch.cuda.stream(aux_stream):
++                event0.wait()
++                result1 = fn1()
++                event1.record()
+         event1.wait()
+     else:
+         result0 = fn0()
+@@ -121,19 +127,22 @@
+     aux_results = [None] * len(aux_fns)
+     pending: list[torch.cuda.Event] = []
+ 
++    from vllm.compilation.breakable_cudagraph import no_allreduce_break
++
+     start_event.record()
+-    if default_first:
+-        default_result = default_fn()
+-    for i, fn in enumerate(aux_fns):
+-        if fn is None:
+-            continue
+-        with torch.cuda.stream(aux_streams[i]):
+-            start_event.wait()
+-            aux_results[i] = fn()
+-            done_events[i].record()
+-        pending.append(done_events[i])
+-    if not default_first:
+-        default_result = default_fn()
++    with no_allreduce_break():
++        if default_first:
++            default_result = default_fn()
++        for i, fn in enumerate(aux_fns):
++            if fn is None:
++                continue
++            with torch.cuda.stream(aux_streams[i]):
++                start_event.wait()
++                aux_results[i] = fn()
++                done_events[i].record()
++            pending.append(done_events[i])
++        if not default_first:
++            default_result = default_fn()
+ 
+     for ev in pending:
+         ev.wait()
+diff --git a/vllm/v1/worker/gpu/cudagraph_utils.py b/vllm/v1/worker/gpu/cudagraph_utils.py
+--- a/vllm/v1/worker/gpu/cudagraph_utils.py
++++ b/vllm/v1/worker/gpu/cudagraph_utils.py
+@@ -14,8 +14,10 @@
+ from tqdm import tqdm
+ 
+ from vllm.compilation.breakable_cudagraph import (
++    BreakableCUDAGraphCapture,
+     BreakableCUDAGraphWrapper,
+     is_breakable_cudagraph_enabled,
++    is_full_graph_eager_allreduce_enabled,
+ )
+ from vllm.compilation.counter import compilation_counter
+ from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
+@@ -488,15 +490,38 @@
+                         if self._capture_mem_samples is not None:
+                             torch.accelerator.synchronize()
+                             free_before = torch.accelerator.get_memory_info()[0]
+-                        with torch.cuda.graph(
+-                            graph, self.pool, stream=self._capture_stream(desc)
++                        # Target model only: the speculator's small forwards would
++                        # turn launch-bound when split.
++                        if is_full_graph_eager_allreduce_enabled() and isinstance(
++                            self, ModelCudaGraphManager
+                         ):
+-                            forward_fn(CUDAGraphMode.NONE)
+-                            # Join offloader's copy stream after forward to avoid
+-                            # unjoined stream error. The last layer's start_prefetch
+-                            # forks copy_stream, but wait_prefetch only happens in
+-                            # the next forward pass.
+-                            get_offloader().join_after_forward()
++                            # Segments split only at the TP all-reduces, which run
++                            # eagerly in between (eager_all_reduce_break); replay()
++                            # runs them in order, like a CUDAGraph's replay().
++                            torch.accelerator.synchronize()
++                            with torch.cuda.stream(self._capture_stream(desc)):
++                                graph = BreakableCUDAGraphCapture(
++                                    pool=self.pool, allreduce_only=True
++                                )
++                                with graph:
++                                    forward_fn(CUDAGraphMode.NONE)
++                                    get_offloader().join_after_forward()
++                            logger.info_once(
++                                "FULL cudagraph %s: %d segments, %d eager breaks",
++                                desc,
++                                graph.num_graphs,
++                                graph.num_eager_breaks,
++                            )
++                        else:
++                            with torch.cuda.graph(
++                                graph, self.pool, stream=self._capture_stream(desc)
++                            ):
++                                forward_fn(CUDAGraphMode.NONE)
++                                # Join offloader's copy stream after forward to avoid
++                                # unjoined stream error. The last layer's start_prefetch
++                                # forks copy_stream, but wait_prefetch only happens in
++                                # the next forward pass.
++                                get_offloader().join_after_forward()
+                         if self._capture_mem_samples is not None:
+                             torch.accelerator.synchronize()
+                             free_after = torch.accelerator.get_memory_info()[0]
+diff --git a/vllm/models/deepseek_v41/common/engram.py b/vllm/models/deepseek_v41/common/engram.py
+--- a/vllm/models/deepseek_v41/common/engram.py
++++ b/vllm/models/deepseek_v41/common/engram.py
+@@ -46,7 +46,10 @@
+ import torch
+ from torch import nn
+ 
+-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
++from vllm.compilation.breakable_cudagraph import (
++    eager_break_during_capture,
++    eager_in_full_graph,
++)
+ from vllm.config import VllmConfig, get_current_vllm_config
+ from vllm.distributed import (
+     get_dp_group,
+@@ -1613,6 +1616,7 @@
+             self._start_prefetch(hash_ids, rows)
+ 
+     @eager_break_during_capture
++    @eager_in_full_graph
+     def _start_prefetch(self, hash_ids: torch.Tensor, rows: torch.Tensor) -> None:
+         # Eager boundaries let the lookup span piecewise graph segments, and
+         # decide per replay (on the replay stream) whether it runs inline.
+@@ -1637,6 +1641,7 @@
+         self._prefetch_done.record(stream)
+ 
+     @eager_break_during_capture
++    @eager_in_full_graph
+     def _finish_prefetch(self, event: torch.cuda.Event) -> None:
+         # Wait for this layer's lookup only, not for later layers on the stream.
+         torch.cuda.current_stream().wait_event(event)
+diff --git a/vllm/models/deepseek_v41/nvidia/model.py b/vllm/models/deepseek_v41/nvidia/model.py
+--- a/vllm/models/deepseek_v41/nvidia/model.py
++++ b/vllm/models/deepseek_v41/nvidia/model.py
+@@ -10,6 +10,7 @@
+ import torch.nn as nn
+ 
+ import vllm.envs as envs
++from vllm.compilation.breakable_cudagraph import is_full_graph_eager_allreduce_enabled
+ from vllm.config import VllmConfig
+ from vllm.config.kernel import MEGA_MOE_BACKENDS, NATIVE_MEGA_MOE_BACKENDS
+ from vllm.distributed import (
+@@ -479,6 +480,9 @@
+             in_piecewise_cudagraph()
+             or not 0 < positions.shape[0] <= MHC_OVERLAP_MAX_TOKENS
+             or not torch.cuda.is_current_stream_capturing()
++            # its side stream spans the attention all-reduce, which may end a
++            # FULL-graph segment (VLLM_FULL_GRAPH_EAGER_ALLREDUCE)
++            or is_full_graph_eager_allreduce_enabled()
+         ):
+             # Use overlap only in FULL graphs; eager warmup initializes Mega mHC.
+             mhc_stream = None
