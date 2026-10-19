@@ -6,7 +6,7 @@ head node's local worker spins on shared memory. A thread woken from an idle GB1
 (TensorFold measured 433 us, and cut its follower's first-gather wait from 440 to 26 us by busy polling: github.com/
 bertholomus/TensorFold, branch deepseek-v41-tp2, 8ec371c / 7e2bc6f), and every rank then waits for the late one at
 the step's first all-reduce: in our k=3 profile the embedding's all-reduce absorbed a 272 / 341 us start skew twice a
-step (LOG Oct 10 21:28, scripts/bench/trace_gaps.py). With the knob set, the remote reader polls without sleeping for
+step (measured Oct 10 with scripts/bench/trace_gaps.py). With the knob set, the remote reader polls without sleeping for
 that many milliseconds after each message, then falls back to the blocking poll with the same timeout, so decode steps
 (tens of ms apart) never sleep and an idle server does not burn a core.
 

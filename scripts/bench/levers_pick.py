@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Pick the Program P levers that won their one-at-a-time A/B (p_levers_ab.sh) for a combined run.
+"""Pick the decode-speed levers that won their one-at-a-time A/B (p_levers_ab.sh) for a combined run.
 
 Per lever, from speed/<tag>_<lever>/ against speed/<tag>_base/: kit_bench set b tok/s per prompt, and the oracle
 (24 greedy continuations + teacher-forced top-20 logprobs) compared as oracle_compare.py does. A lever is picked when:
@@ -15,7 +15,7 @@ Per lever, from speed/<tag>_<lever>/ against speed/<tag>_base/: kit_bench set b 
     top-1 agreement >= MIN_TOP1 and truncated KL <= MAX_KL against the baseline. Those bars are set at routing-flip
     noise, not at bit-closeness: any change upstream of a router, even 1e-6 in its logits, flips near-tied 6th / 7th
     experts and the flips cascade (the router lever on v3: top-1 97.66%, KL 0.013 with fp32-identical math), the size
-    of the prefill path's run-to-run spread before deterministic prefill (97.9%, 0.0137, LOG Oct 9 15:42); mHC overlap
+    of the prefill path's run-to-run spread before deterministic prefill (97.9%, 0.0137, measured Oct 9); mHC overlap
     (vLLM's own TF32 prenorm path on family-100 Blackwell) lands at 0.020. A real error shows far past it; quality
     against native stays the panel KLD's and the eval suites' job.
 Details go to stderr; the last stdout line is the picked levers, space-separated (empty if none).

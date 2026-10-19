@@ -3,7 +3,7 @@ Short-context CUDA graph twins for DeepSeek-V4.1's sparse indexer (VLLM_SHORT_CT
 unset). Below index_topk compressed entries the indexer selects every entry, and V4.1 already skips its scoring then
 (wq_b GEMM, logits, candidate masks, top-k: _fill_short_context_topk_indices), but only eagerly: inside a CUDA graph the
 branch is never taken, so every decode step scores. On 2x GB10 the 8 scoring layers cost +133 us each over a plain
-layer at k=5 (LOG Oct 11 06:27), ~1.2 ms a verify round, for contexts where the result is "all entries".
+layer at k=5 (measured Oct 11), ~1.2 ms a verify round, for contexts where the result is "all entries".
 With bounds set, each FULL decode graph of the target model gets a twin per bound, captured with the bound published
 (vllm/v1/worker/gpu/short_ctx.py), so the indexer takes its short branch in the layers whose ratio allows it
 (bound // compress_ratio <= index_topk); the runner sets the batch's longest sequence after the step (+ a margin,

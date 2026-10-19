@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """exl3_smoe's fused launch (SmoeLayer.fused: router GEMV + DeepSeek-V4 top-k + routed + shared experts in one
-persistent launch, Program P stage P2) against the pair of launches it replaces: exl3_router.router_topk, then
+persistent launch) against the pair of launches it replaces: exl3_router.router_topk, then
 SmoeLayer(..., shared). They run the same arithmetic in the same order, so routing ids, routing weights and the output
 must be bit-identical: 1..8 tokens, padded rows, with and without the shared expert, image-sentinel tokens on
 bias_vl, and CUDA-graph replays on new inputs (the launch zeroes its own sync words for the next one). A TP=2 rank-0

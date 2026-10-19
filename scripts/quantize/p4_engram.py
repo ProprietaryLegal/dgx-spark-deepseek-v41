@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """EXL3 encode of DeepSeek-V4.1's Engram projections (layers.<1|14>.engram.wkv: 24 hash columns x 256 -> 5120 x 5, the
-last big FP8 GEMMs of a decode step: 78.6 MB a rank each on Marlin, ~386 us a call on GB10, LOG Oct 11 08:44), from the
+last big FP8 GEMMs of a decode step: 78.6 MB a rank each on Marlin, ~386 us a call on GB10, measured Oct 11), from the
 official checkpoint's FP8 tensors and the input Hessians a serve captured (VLLM_EXL3_HCAP with
 VLLM_EXL3_HCAP_MATCH='engram\\.wkv$', scripts/quantize/hcap_engram.sh). Column-parallel: every rank sees the whole
 input, so rank 0's capture is the module's H.

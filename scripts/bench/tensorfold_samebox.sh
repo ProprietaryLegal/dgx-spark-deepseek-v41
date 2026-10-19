@@ -13,7 +13,7 @@
 # TF_ENV="TF_DS_CONF_LOG=1 ...": extra engine env (e.g. its DSpark acceptance report every 200 rounds)
 set -euo pipefail
 HEAD=${HEAD:-spark}; WORKER=${WORKER:-spark2}
-FAB_IF=${FAB_IF:-enp1s0f0np0}; HCAS=${HCAS:-rocep1s0f0}; GID_HCA=${GID_HCA:-rocep1s0f0}   # one port: the second PCIe function has no IPv4 GID at index 3 (LOG Oct 10 05:52, Oct 11 06:03)
+FAB_IF=${FAB_IF:-enp1s0f0np0}; HCAS=${HCAS:-rocep1s0f0}; GID_HCA=${GID_HCA:-rocep1s0f0}   # one port: the second PCIe function has no IPv4 GID at index 3 (measured Oct 10 and 11)
 IMAGE=${IMAGE:-tensorfold:0.6.6-cb2ebf0}             # nvcr.io/nvidia/pytorch:26.07-py3 + TensorFold 0.6.6 (his v0.5 base)
 FORK=${FORK:-/home/spark/dsv41_recipe/tensorfold_fork}
 MODEL=${MODEL:-/home/spark/models/Mia-DeepSeek-V4.1-Flash-EXL3-2.9bpw-64ba41b6}
@@ -74,7 +74,7 @@ case "$cmd" in
         || rsync -a --delete --exclude .git --exclude __pycache__ -e "ssh -o BatchMode=yes" "$HOME/Projects/benchmarks/tensorfold_v41/tensorfold_fork/" "$n:$FORK/"
       # Network adaptation, measurement copy only: his RDMA gather sets a 4096-byte path MTU (jumbo frames on his link);
       # our fabric NICs run MTU 1500 (RoCE active MTU 1024), where 4096 drops every packet (transport retry exceeded,
-      # seen with our port of the same ring, LOG Oct 10 05:23). PATH_MTU=4096 keeps his value (after an MTU-9000 setup).
+      # seen with our port of the same ring, Oct 10). PATH_MTU=4096 keeps his value (after an MTU-9000 setup).
       sh_ "$n" "sed -i 's/rtr.path_mtu = IBV_MTU_4096;/rtr.path_mtu = IBV_MTU_${PATH_MTU:-1024};/' $FORK/src/tensorfold/cuda/rdma_gather.cu && grep -c 'IBV_MTU_${PATH_MTU:-1024};' $FORK/src/tensorfold/cuda/rdma_gather.cu"
     done
     master=$(fab_ip "$HEAD"); g0=${GID:-$(gid_of "$HEAD")}; g1=${GID:-$(gid_of "$WORKER")}

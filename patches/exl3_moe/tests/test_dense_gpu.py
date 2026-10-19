@@ -204,7 +204,7 @@ def test_shape_mismatch_raises():
 def test_main_proj_large_inputs(T):
     """main_proj (the drafter's context combiner, replicated) reads the target's raw residual stream: |x| up to ~1.6e5.
     At 4 rows it runs on mrow (fp32 scaling before its fp16 cast), at 20 on exllamav3, whose fp16 input cast overflowed
-    to inf / NaN before dense.py scaled it by a power of two (LOG Oct 10 09:18)."""
+    to inf / NaN before dense.py scaled it by a power of two (found Oct 10)."""
     from vllm.model_executor.layers.linear import ReplicatedLinear
     in_f, out_f, k = 1024, 512, 5
     t = full_tensors(in_f, out_f, k, 30)

@@ -3,7 +3,7 @@ VLLM_MOE_GATE_FIRST=1 (default off): the MoE runner applies the router gate befo
 aux stream, instead of after. The router feeds top-k and the routed experts, the critical path of a decode MoE; the
 shared expert only has to finish before the final add. Forked first, the shared expert's kernels take the SMs and the
 router GEMM waits for them: on V4.1 decode (2x GB10, TP=2, k=5) the router starts a median 19.3 us after its input is
-ready, over 1,400 profiled layers (LOG Oct 11 05:52). Same math, same order of floating-point work on each stream.
+ready, over 1,400 profiled layers (Oct 11). Same math, same order of floating-point work on each stream.
 
 --- a/vllm/model_executor/layers/fused_moe/runner/moe_runner.py
 +++ b/vllm/model_executor/layers/fused_moe/runner/moe_runner.py

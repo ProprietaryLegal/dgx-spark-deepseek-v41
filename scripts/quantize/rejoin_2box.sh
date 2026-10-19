@@ -46,8 +46,10 @@ sh_ "$SOLO" "docker rm -f dsv41-p1 >/dev/null"
 echo "$(date +%H:%M) stopped the solo run; layers 0-$N are done"
 
 # 3. mirror the tensor files (the solo box's copy wins: its stream is the one later layers were encoded on), clear stale
-#    exchange files and leftovers, drop page caches (no GPU job on either box now), check every layer 0-N is complete
-sh_ "$SOLO" "rsync -a --exclude '*.tmp' --include 'layer_*.part*.safetensors' --include 'layer_*.part*.json' --exclude '*' \
+#    exchange files and leftovers, drop page caches (no GPU job on either box now), check every layer 0-N is complete.
+#    -rlt, not -a: the pass's files are root's (written in the container), and -a's chgrp of the copies already on the
+#    returning box fails with rsync code 23 (Oct 18 14:54)
+sh_ "$SOLO" "rsync -rlt --exclude '*.tmp' --include 'layer_*.part*.safetensors' --include 'layer_*.part*.json' --exclude '*' \
   -e 'ssh -T -o Compression=no -c aes128-gcm@openssh.com' $RUN/ $JOIN_IP:$RUN/"
 for h in "$SOLO" "$JOIN"; do
   sh_ "$h" "rm -f $RUN/exchange/Y_L* $RUN/*.tmp; sync; echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null; \

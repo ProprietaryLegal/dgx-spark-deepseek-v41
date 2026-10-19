@@ -1,13 +1,13 @@
 Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0021.
 VLLM_DSV41_TRITON_VERIFY=1 (default off): on SM12x (GB10), DeepseekV4FlashInferSM120Attention sends its decode-form calls
 (where the target's DSpark verify rows land; the drafter's too) and, in _forward_prefill, the chunks made only of short
-queries to the EXL3 plugin's Triton sparse attention. (The first version hooked _forward_prefill alone and never ran:
-LOG Oct 11 14:45.) Prefill-path rule:
+queries to the EXL3 plugin's Triton sparse attention. (The first version hooked _forward_prefill alone and never ran,
+Oct 11.) Prefill-path rule:
 prefill chunks made only of short queries (DSpark verify rows, up to _FLAT_MAX_Q = 8 tokens a request; V4.1 files
 them under prefill) to the EXL3 plugin's Triton sparse attention (vllm_exl3_moe/sparse_attn.py) instead of
 flashinfer_trtllm_batch_decode_sparse_mla_dsv4. FlashInfer's SM120 planner routes these 6-row calls by its calibrated
 decode/prefill crossover to prefill_mg_dual, ~49 us a layer in 38 layers; forcing its decode kernel measured slower
-(lever fidec, LOG Oct 11 13:32). The Triton kernel reads the same fp8_ds_mla pages (584 B records), per-token SWA and
+(lever fidec, Oct 11). The Triton kernel reads the same fp8_ds_mla pages (584 B records), per-token SWA and
 compressed indices and lengths, the sink and the scale, and writes the same [T, H, 512] output (rope part rotated).
 Rows past a request's DSpark depth (vLLM's is_padding, patch 0010) skip their attention (zeros; live rows keep their
 bits, and causal attention means no live row reads a dead one). Rounding class (another accumulation order): judged on

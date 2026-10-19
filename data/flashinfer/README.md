@@ -9,5 +9,5 @@ heads (V4.1 at TP=2) the crossover is 0 at top-k 128, so the 6-token verify call
 
 `sparse_mla_sm120_cpb.gb10_dec16.json`: spark's file with every 32- and 64-head dsv4 crossover at 16 (each box's
 `~/.cache/dsv41-serve/fi_autotune_dec16/` holds its own file raised the same way) (lever `fidec`,
-LOG Oct 11 11:35). FlashInfer reads the file under `FLASHINFER_AUTOTUNE_DIR`; without one (and with autotune off, as
+Oct 11). FlashInfer reads the file under `FLASHINFER_AUTOTUNE_DIR`; without one (and with autotune off, as
 our launcher runs) it routes decode-first. Device key "0:NVIDIA GB10", so either file applies to any DGX Spark.

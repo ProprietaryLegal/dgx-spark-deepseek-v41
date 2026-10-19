@@ -148,7 +148,7 @@ def main():
         print("PASS" if ok else "FAIL", flush=True)
     dist.barrier()
     # no destroy_process_group: with the ring's pinned proxy thread alive, ProcessGroupNCCL's teardown hung past the
-    # run's timeout after a passing stress run (LOG Oct 11 05:39); the OS frees the queue pairs and registrations
+    # run's timeout after a passing stress run (seen Oct 11); the OS frees the queue pairs and registrations
     sys.stdout.flush()
     os._exit(0 if ok else 1)
 

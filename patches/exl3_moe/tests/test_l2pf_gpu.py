@@ -15,6 +15,7 @@ import pytest
 torch = pytest.importorskip("torch")
 if not torch.cuda.is_available():
     pytest.skip("CUDA device required", allow_module_level=True)
+pytest.importorskip("vllm")   # every test takes the l2pf fixture, and l2pf.py imports vllm.logger
 
 DEV = "cuda"
 

@@ -116,6 +116,7 @@ Two modes, one script (`scripts/quantize/guards.sh`, on each Spark):
 | one rank exited, the other hangs | a TP pair cannot heal one rank | `dsv41_tp2.sh down`, then `up`; the containers run with `--restart no` on purpose |
 | decode slower on some runs, at random | page-cache drops during the serve | `guards.sh serve` on both boxes |
 | a Spark stops answering during a copy | multi-GB file I/O beside a GPU job (FINDINGS 6) | power-cycle it; copy images and weights with the GPUs idle |
+| a GPU job runs ~2x slower on one box than on its twin, after days of uptime | free memory split into small blocks: `/proc/buddyinfo` orders 9 and up near zero, `kcompactd` busy (FINDINGS 22) | stop the job, then `sync; echo 1 \| sudo tee /proc/sys/vm/drop_caches; echo 1 \| sudo tee /proc/sys/vm/compact_memory` (under a second with the GPU idle) and restart it |
 | the quantization scripts cannot find files | their paths default to `/home/spark/...` on the Sparks | set `RUN` / `CALDIR` / `OFFICIAL` / `PLAN` / `P1`, or `sudo ln -s "$HOME" /home/spark` (NOTES.md) |
 
 ## 8. Reproduce the weights

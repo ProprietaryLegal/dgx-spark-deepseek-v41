@@ -3,8 +3,8 @@ A hook for out-of-tree MoE quant methods that run a decode step's whole MoE phas
 V4.1) asks its routed experts' quant method for `fused_moe_forward(moe, hidden_states, input_ids)` before calling the
 FusedMoE runner; a tensor return is the layer's output (already TP-reduced), None runs the runner as before. Without
 such a method, or with it returning None, nothing changes. vllm_exl3_moe implements it with VLLM_EXL3_MOE_FUSED=1:
-router GEMV + DeepSeek-V4 top-k + routed experts + the shared expert in one persistent exl3_smoe launch (Program P
-stage P2), bit-identical to its router_topk + smoe(shared) pair (plugin tests/test_smoe_fused_gpu.py). V4.1's model is
+router GEMV + DeepSeek-V4 top-k + routed experts + the shared expert in one persistent exl3_smoe launch,
+bit-identical to its router_topk + smoe(shared) pair (plugin tests/test_smoe_fused_gpu.py). V4.1's model is
 not torch.compiled (no support_torch_compile), so the Python branch runs eagerly and inside FULL CUDA-graph capture.
 
 diff --git a/vllm/models/deepseek_v4/nvidia/model.py b/vllm/models/deepseek_v4/nvidia/model.py

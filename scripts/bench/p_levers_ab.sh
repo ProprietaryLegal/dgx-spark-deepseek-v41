@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Program P levers (NORTH_STAR.md) on the live serve: a baseline of one image and one weight set, then each lever alone,
+# Decode-speed levers on the live serve: a baseline of one image and one weight set, then each lever alone,
 # then any combination asked for. Per configuration: set b with DSpark acceptance and the oracle (serve_speed_suite.sh
 # QUICK=1), and oracle_compare.py against the baseline: top-1 agreement and truncated KL of the serving path (exactly
 # 0 / 100% for the levers that keep the math: run flags, remote spin, flag-write, Engram spin reader; small for those
@@ -57,7 +57,7 @@ declare -A LEVER=(
   [dk4]=""            # the same at K4
   [dx3]=""            # no env: the drafter's routed experts on EXL3 K3 come from the model dir (...-dx3, p4_drafter_experts_variant.py)
   [dx4]=""            # the same at K4
-  [pcores]="EXL3_CPU_PIN=5-9,15-19"   # every vLLM process on GB10's Cortex-X925 cores (plugin __init__, LOG Oct 11 19:49)
+  [pcores]="EXL3_CPU_PIN=5-9,15-19"   # every vLLM process on GB10's Cortex-X925 cores (plugin __init__, measured Oct 11)
   [woa4]=""           # no env: the dense wo_a at K4 comes from the model dir (...-v3c-dk5-h4-dx3, session 9)
 )
 cstate() {   # $1: 1 = disable LPI-2 / LPI-3 on every core of both Sparks, 0 = enable them again

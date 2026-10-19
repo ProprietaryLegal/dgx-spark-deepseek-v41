@@ -5,7 +5,7 @@ with the carried pre-mix + RMSNorm (mhc_pre_big_fuse_with_norm, split "input") r
 mhc.post_collapse (csrc/exl3_mhc.cu: token x 256-column blocks instead of one block a token). It returns
 (residual, layer_input) exactly like V4.1's fused all-reduce + mHC hook (TP=4 NVLink only), so mhc_pre_delayed_overlap
 then only launches the mix statistics on the side stream. The TileLang pair costs ~12 + ~9 us at a 6-token verify step
-on GB10, 80 boundaries a round (LOG Oct 11 05:52). Same fp32 FMA chain and bf16 rounding points; the RMSNorm's sum
+on GB10, 80 boundaries a round (Oct 11). Same fp32 FMA chain and bf16 rounding points; the RMSNorm's sum
 of squares is added in another order (plugin tests/test_mhc_gpu.py: 0 differing elements at 1-8 tokens).
 
 --- a/vllm/models/deepseek_v41/nvidia/ops/mhc.py

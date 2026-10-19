@@ -2,18 +2,24 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-DeepSeek-V4.1-Flash on two NVIDIA DGX Sparks, from weights we quantized out of the official checkpoint, served by upstream vLLM with our patches and one plugin (our own decode kernels), tensor parallel 2 over the ConnectX link. On the same two boxes and client it decodes faster than TensorFold v0.6.0, its newest engine, on code and structured output, with weights closer to the native model than any other pack we measured.
+DeepSeek-V4.1-Flash on two NVIDIA DGX Sparks, from weights we quantized out of the official checkpoints, served by upstream vLLM with our patches and one plugin (our own decode kernels), tensor parallel 2 over the ConnectX link. Two builds, one engine: DeepSeek-V4.1-Flash-1017 (DeepSeek's Oct 17 update, the default since v1.2) and the launch checkpoint. On the launch checkpoint, on the same two boxes and client, it decodes faster than TensorFold v0.6.0 (measured Oct 12) on code and structured output, with weights closer to the native model than any other pack we measured. On 1017 it decodes at the same speed, with weights 20% closer to native than LibertAIDAI's 1017 EXL3 2.9 bpw pack on the same panel; other 1017 packs made with this recipe, two of them closer to native at more bits, are in [BENCHMARKS.md](BENCHMARKS.md#the-1017-build-fidelity-and-suites).
 
-The official checkpoint (`deepseek-ai/DeepSeek-V4.1-Flash` @ `2cba9e42`) is 510 GB: 289 GB of MXFP4 routed experts, 203 GB of Engram tables, 18.5 GB of everything else. Two Sparks have 256 GB between them. This repo makes it fit and run:
+The official checkpoints (`deepseek-ai/DeepSeek-V4.1-Flash-1017` @ `1bae0e10` and the launch `deepseek-ai/DeepSeek-V4.1-Flash` @ `2cba9e42`, the same layout and sizes) are 510 GB each: 289 GB of MXFP4 routed experts, 203 GB of Engram tables, 18.5 GB of everything else. Two Sparks have 256 GB between them. This repo makes it fit and run:
 
 - the 15,360 routed experts re-encoded in EXL3 at 2, 3, 4 or 5 bits per weight, chosen per expert from measured sensitivity, 2.70 bpw on average (289 GB down to about 184 GB),
 - the Engram tables read from the checkpoint files on NVMe at lookup time, CUDA-graph safe, so they never sit in memory,
 - the dense linears and the LM head on EXL3 too (K4, `wo_a` K5, head K4), and the DSpark drafter's dense layers (K5) and routed experts (K3), all through our decode kernels `exl3_mrow` and `exl3_smoe`,
 - per-round DSpark draft depth from a measured cost table, TensorFold's RDMA all-reduce ring, paced L2 prefetch and, since v1.1, its grouped EXL3 prompt kernels for the routed experts (Apache-2.0, credited), FlashInfer autotune off.
 
-Weights: [`sudoingx/DeepSeek-V4.1-Flash-EXL3-2.7bpw`](https://huggingface.co/sudoingx/DeepSeek-V4.1-Flash-EXL3-2.7bpw) (196 GB; the two Engram shards come from DeepSeek's own repo, quickstart step 3).
+Weights: the 1017 build, [`sudoingx/DeepSeek-V4.1-Flash-1017-EXL3-2.7bpw`](https://huggingface.co/sudoingx/DeepSeek-V4.1-Flash-1017-EXL3-2.7bpw) (196 GB), and the launch build, [`sudoingx/DeepSeek-V4.1-Flash-EXL3-2.7bpw`](https://huggingface.co/sudoingx/DeepSeek-V4.1-Flash-EXL3-2.7bpw) (196 GB). The two Engram shards come from DeepSeek's own repo of the same checkpoint (quickstart step 3).
 
-Build: v3 (`dsv41-recipe-exl3-v3b-dk5-h4-dx3` on our boxes; see [How it works](#how-it-works) for what v2, v2.1 and v3 contain).
+Builds: 1017 (`dsv41-recipe-exl3-1017b-dk5-h4-dx3` on our boxes) and v3 on the launch checkpoint (`dsv41-recipe-exl3-v3b-dk5-h4-dx3`), the same composition; see [How it works](#how-it-works) for what v2, v2.1 and v3 contain.
+
+**v1.2 (Oct 2026), DeepSeek-V4.1-Flash-1017, same engine:**
+- **New weights:** the whole pipeline re-run on 1017 (statistics, sensitivity, allocation, the encode, the dense pass, the drafter) with the launch build's plan settings and composition. Panel KLD vs native 1017: 0.0243, against 0.0304 for LibertAIDAI's 1017 2.9 bpw pack; every suite within noise of native 1017 (HumanEval+ 96.3 / 90.2, MBPP+ 89.7 / 76.2, IFEval prompt strict 89.1).
+- **Speed holds:** set b 100.7 / 59.2 / 141.3 tok/s, against the launch build's 103.0 / 58.0 / 142.6 in the same session.
+- **Engine unchanged:** the same serving image as v1.1, no rebuild.
+- **To switch:** download the 1017 weights and 1017's own Engram shards (quickstart step 3: the launch checkpoint's Engram shards differ), then `up` with `MODEL_DIR` on the new folder and `DOCKER_ENV="VLLM_DSPARK_ROUND_MS=28.99,32.76,36.11,39.34,42.43,45.06"`, the depth table measured on 1017 (the launcher's default is the launch build's, under 1 ms a round away).
 
 **v1.1 (Oct 13 2026), same weights:**
 - **Prefill:** TensorFold's grouped EXL3 prompt kernels for the routed experts are on by default (`VLLM_EXL3_MOE_TF_PROMPT=1`). Prefill is 2,090 / 2,092 tok/s at 8K / 32K (v1: 1,763 / 1,773, so +18.5% / +18.0%). A 255,709-token prompt's first token arrives in 159.6 s (v1: 183.3 s).
@@ -28,6 +34,17 @@ Build: v3 (`dsv41-recipe-exl3-v3b-dk5-h4-dx3` on our boxes; see [How it works](#
 Every number below was measured on the same two Sparks. Comparison builds were run by us on these boxes with the same client; no number is copied from another README.
 
 ### Speed
+
+The 1017 build and the launch build in one session (set b, 9 reps a prompt, each build with its own depth table; raw: `data/speed/r1017_setb9`):
+
+| | 1017 build | launch build |
+|---|---|---|
+| decode, code / prose / structured, DSpark on | 100.7 / 59.2 / 141.3 tok/s | 103.0 / 58.0 / 142.6 tok/s |
+| MemAvailable after load, head / worker | 8 / 9 GiB | 9 / 9 GiB |
+
+Against TensorFold on 1017, same two boxes, same client, one session, two boots each (set b, 9 reps a prompt; raw and setup: `data/speed/samebox_1017`): TensorFold `8e0966e2` with the object-oriented-architects 1017 EXL3 2.7 bpw pack and lucataco's recipe settings read 99.5 / 59.1 / 143.4 and 98.6 / 58.2 / 140.8 tok/s; this build 101.1 / 59.3 / 142.5 and 100.9 / 59.1 / 142.5. Code +2.0% and prose +0.9% on the two-boot means, structured level (+0.3%, inside TensorFold's boot-to-boot swing). TensorFold loads with 11-13 GiB free per box against our 7-9 and serves a 1M window.
+
+The rest of this section is the launch build:
 
 `kit_bench.py` set b: single stream, greedy, thinking off, 384-token replies, median of 9 reps a prompt (Mia-AiLab's kit: 3). DSpark speculative decoding on (k = 5 with per-round depth) unless the row says off. TensorFold is bertholomus's engine (v0.6.0, TensorFold 1.0's native Zig engine, built from source at `ce20a54`) serving Mia-AiLab's 2.9 bpw pack, run by us on these boxes with the same client; two network constants changed for our fabric (path MTU 1024, RoCE GID index 3; his are hardcoded for jumbo frames and index 5).
 
@@ -46,6 +63,18 @@ Every number below was measured on the same two Sparks. Comparison builds were r
 Raw files and method for every row: [BENCHMARKS.md](BENCHMARKS.md). Greedy output is identical run to run on all three prompts for this build and for TensorFold. The rows from set a down come from one run of `scripts/bench/serve_speed_suite.sh` on the recipe defaults (Oct 12 02:14-02:37; its set b measured 102.2 / 58.1 / 142.6), DSpark off from a boot with `SPEC=` (empty). The prefill row is its own run, both engines on fresh boots with the same client, 3 reps each (Oct 12 13:21-13:36); the first 8K rep of each reads Engram's rows cold (ours 1,407, TensorFold 2,111 tok/s). Only 2 sequences are served at once (`MAX_SEQS=2`, for the 262K context); TensorFold serves 4. The decode rows are generated from the raw result files by `scripts/bench/results_table.py` (this build: the recipe defaults, median of 9 reps a prompt, Oct 12 00:23; every rep within 102.4-103.4 / 58.1-58.6 / 140.8-142.1). TensorFold's column is its 9-rep median (Oct 12, same session), with slow reps on all three prompts (ours: none in 27); its 3-rep run measured 101.0 / 62.6 / 140.3. Keep the page-cache guard off while serving (`guards.sh serve`): its drops evict Engram's hot rows and gave structured an intermittent ~5% slow mode.
 
 ### Quality
+
+The 1017 build, against native 1017 on the same panel, and against LibertAIDAI's 1017 EXL3 2.9 bpw pack (`c178a012`, every EXL3 tensor it ships loaded):
+
+| | 1017 build | LibertAIDAI 1017 2.9 bpw |
+|---|---|---|
+| KLD vs native 1017 (mean; the 8 domains weighted equally) | **0.0243** (0.0405) | 0.0304 (0.0454) |
+| top-1 agreement | **95.47%** | 94.76% |
+| domains closer to native | 7 of 8 | multilingual |
+| IFEval-reply panel KLD (300 IFEval prompts, native replies) | 0.1199 | **0.1135** |
+| HumanEval+ / MBPP+ / IFEval vs native 1017 (paired) | within noise on all three (p >= 0.14) | not measured |
+
+Raw files and the suites table: [BENCHMARKS.md](BENCHMARKS.md). The rest of this section is the launch build:
 
 KL divergence and top-1 agreement against the native model on our panel: 199 conversations, 254,846 scored assistant positions, every build scored by DeepSeek's own reference implementation (`inference/model.py`). Method in [Quality method](#quality-method).
 
@@ -106,10 +135,11 @@ git clone https://github.com/sudoingX/dgx-spark-deepseek-v41 ~/dsv41_recipe
 cd ~/dsv41_recipe && PEER=<second-spark> ./install.sh   # every step it runs: GUIDE.md, section 1
 HEAD=<ssh-host-of-rank-0> WORKER=<ssh-host-of-rank-1> ./check.sh   # read-only, PASS / WARN / FAIL per check
 
-# 3. weights, on both Sparks at the same absolute path
-hf download sudoingx/DeepSeek-V4.1-Flash-EXL3-2.7bpw --local-dir ~/models/dsv41-exl3
-hf download deepseek-ai/DeepSeek-V4.1-Flash model-00047-of-00048.safetensors model-00048-of-00048.safetensors \
-  --revision 2cba9e42aa026125f3ed06c6d98c1db82f7ca027 --local-dir ~/models/dsv41-exl3   # Engram tables, 203 GB
+# 3. weights, on both Sparks at the same absolute path (the 1017 build; for the launch build use
+#    sudoingx/DeepSeek-V4.1-Flash-EXL3-2.7bpw and deepseek-ai/DeepSeek-V4.1-Flash @ 2cba9e42aa026125f3ed06c6d98c1db82f7ca027)
+hf download sudoingx/DeepSeek-V4.1-Flash-1017-EXL3-2.7bpw --local-dir ~/models/dsv41-exl3
+hf download deepseek-ai/DeepSeek-V4.1-Flash-1017 model-00047-of-00048.safetensors model-00048-of-00048.safetensors \
+  --revision 1bae0e1088993b9b82de08f59de5be5a34e42170 --local-dir ~/models/dsv41-exl3   # Engram tables, 203 GB
 (cd ~/models/dsv41-exl3 && sha256sum -c MANIFEST.sha256)
 
 # 4. serve, from the control machine
@@ -264,6 +294,7 @@ Calibration (v3, `cal_v3`): 766 sequences, 853,106 tokens = the base set, 374 se
 - **This engine only.** The checkpoint's quant method (`deepseek_v41_exl3`) needs the plugin and patches 0001-0007 on vLLM `6e517b15`. Stock vLLM will not load it. Other engines: not tested.
 - **Two sequences at a time** (`MAX_SEQS=2`), up to 262,144 tokens each.
 - **GB10 memory traps.** CUDA allocations do not reclaim page cache (the launcher drops it on both nodes and needs passwordless `sudo -n` for that one command, otherwise it prints a warning). Keep 4 GiB or more MemAvailable per node after load; raise `UTIL` only with a measurement. FlashInfer autotune grows driver memory per new kernel shape; leave it off.
+- **Compact memory on a box that has been up for days.** Free memory splits into small blocks over days of uptime, and a GPU job started on such a box ran ~2x slower than on its twin (a quantization pass: 9.5 against 5.0 s an expert, `kcompactd` at 100% of a core). With the GPUs idle, `sync; echo 1 | sudo tee /proc/sys/vm/drop_caches; echo 1 | sudo tee /proc/sys/vm/compact_memory` takes under a second; then start the job.
 - **No large file I/O beside a running GPU job.** A Spark went silent twice under a long GPU job: once during a 25 GB image copy, once at a layer exchange of the two-box quantization pass (~8 GB of files landing per layer). Likely mechanism: on GB10, CUDA allocations cannot reclaim page cache, so a burst of file I/O starves the GPU job's next allocation. The quantization pass now moves its data in chunks and evicts each file from the page cache; copy images and weights while the boxes are idle.
 - **If one rank dies, restart both** (`dsv41_tp2.sh down` then `up`). The containers run with `--restart no` on purpose: a restarted single rank cannot rejoin its peer.
 

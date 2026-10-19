@@ -8,7 +8,7 @@
 #   - RoCE GID index 3 instead of 5 (our IPv4 RoCE v2 GID sits at index 3; model.zig x2, layer_main.zig x1).
 # One RoCE port (rocep1s0f0), as for v0.5.1.
 # Inputs on both boxes under /home/spark/dsv41_recipe/tfzig: out/native/bin/tensorfold-native (rank 0, the server) and
-# out/bin/tf-dsv41-lanes (rank 1), from `zig build install native` (LOG Oct 12), kit/ (his kit/ +
+# out/bin/tf-dsv41-lanes (rank 1), from `zig build install native` (Oct 12), kit/ (his kit/ +
 # the generated files, verify_kit.sh: 221 files OK), dsv41_token_map.json; the v0.5.1 engine's rank caches in
 # tf_rank_cache. Run from the control machine with nothing else on either GPU:
 #   ./tensorfold_zig_samebox.sh up | bench [OUT_ID] | logs [head|worker] | down

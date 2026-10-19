@@ -76,6 +76,24 @@ measurement behind it and what the recipe does about it. Speeds are `kit_bench.p
     (`kit_bench.py depth`); after a real 32K document, 81.7. Random tokens draft easily. Quote the real-document
     number for real use.
 
+## From the 1017 rebuild
+
+22. **Days of uptime fragment free memory, and a GPU job then runs ~2x slower.** A Spark up 8 days 18 hours had no free
+    block of 2 MiB or more (orders 9-13 of `/proc/buddyinfo` all zero); its half of the two-box pass 1 ran 9.5 s an
+    expert against 5.0 on the other box (up 4 days 15 hours), with the same image, plan and clocks and no throttle flags.
+    `kcompactd` sat at 100% of a core, and the pass spent 4,670 s in the kernel against 571 s in user code (the other
+    box: 354 / 666). Compacting with the pass running helped only partly (5.8 s an expert). With the pass stopped,
+    `drop_caches` plus `echo 1 > /proc/sys/vm/compact_memory` took under a second and left 15,478 / 6,150 / 1,639 / 109
+    free blocks at orders 9-12; restarted, that half ran at its twin's rate. On a box up for days, compact with the GPU
+    idle before a long job.
+23. **A checkpoint update can read more sensitive and still quantize the same.** On DeepSeek-V4.1-Flash-1017 the
+    per-layer sensitivity (KL at the output per unit of routed-output noise) averaged 1.35x the launch checkpoint's
+    (one layer of 40 lower), yet the same allocation settings at the same 2.70 bpw landed the same panel KLD against each
+    checkpoint's own native: 0.0243 for both shipping compositions, 0.0237 vs 0.0236 for dense K4, 0.0219 vs 0.0216 for
+    dense K5. Sensitivity sets how the bits split between experts; across checkpoints it did not predict the absolute
+    KLD, so the caps came from another pack measured on the same checkpoint and panel (LibertAIDAI's
+    1017 EXL3 2.9 bpw).
+
 Measured and dropped (each A/B in `BENCHMARKS.md`): PIECEWISE graphs, eager all-reduces in FULL graphs (patch 0009),
 FlashInfer's decode kernel for verify rows, top-64 Markov drafting, int8 activations, Engram wkv at K4, a speed-aware
 expert budget, the drafter's dense at K3 / K4, pinning vLLM to the fast CPU cores.

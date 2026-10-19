@@ -1,7 +1,7 @@
 Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0019.
 VLLM_DSV41_FLAT_VERIFY=1 (default off): DeepSeek-V4.1's short queries (speculative verify rows, 2-8 tokens a request)
 go to FlashInfer's one-row sparse-MLA decode kernel as one query each, instead of the multi-row kernel
-(sparse_mla_prefill_mg_dual: 44 us a layer for 6 rows on GB10, 38-39 layers a k=5 round; LOG Oct 11 06:50 / 08:30).
+(sparse_mla_prefill_mg_dual: 44 us a layer for 6 rows on GB10, 38-39 layers a k=5 round; measured Oct 11).
 V4.1's SWA metadata files verify rows under prefill, so this is the prefill branch's call. The sparse indices (SWA +
 compressed storage offsets) are per token already; the metadata builder adds each token's own causal length,
 seq_len[r] - (query_end[r] - 1 - t), into a persistent buffer once a step (as the non-causal DSpark path flattens its

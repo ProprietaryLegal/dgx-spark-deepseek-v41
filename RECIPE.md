@@ -1,7 +1,7 @@
 # DeepSeek-V4.1-Flash on 2x DGX Spark: the recipe, step by step
 
-Draft (Oct 8 2026; weights, engine and serve sections current as of Oct 11 23:30). Not published; numbers and the final build choice
-land after the quality and speed gates. Where the mission stands: `NORTH_STAR.md`. Every step names the script that does it and what it writes. Paths assume both Sparks mirror
+How the published builds were made: v3 on the launch checkpoint (v1, Oct 12 2026) and the same pipeline on
+DeepSeek-V4.1-Flash-1017 (v1.2, Oct 19). Every step names the script that does it and what it writes. Paths assume both Sparks mirror
 `~/dsv41_recipe/` (this repo's `scripts/` and `patches/`) and hold the official checkpoint at the same path.
 
 ## 0. What you get
@@ -97,9 +97,9 @@ The KLD panel is unchanged.
 | sensitivity | `p4_sensitivity.py` | per layer: KL at the output per unit of per-token relative noise in the routed output | ~27 min, one box |
 | allocation | `p4_allocate.py` | K in {2, 3, 4, 5} per expert: importance = sensitivity x token share, measured error per K, memory budget + decode-bandwidth cap; super experts (>= 20% of a layer's routed energy) and the DSpark target layers 37-39 protected | seconds |
 | pass 1 | `p4_pass1.py` via `run_pass1_2box.sh` | sequential EXL3 encode of the routed experts (routing-weighted Hessians with an all-token prior, mul1 codebook), each layer calibrated on the stream through the already-quantized layers; the two boxes split each layer's experts and swap partial MoE outputs | ~20 min per layer on 2 boxes (K2-heavy layers slowest), ~13 h for 40 |
-| dense pass (optional) | `p4_dense.py` | input Hessians of wq_a + wkv (one, shared), wq_b, wo_a (per head group), wo_b, shared expert, and the head; EXL3 encode | TBD |
-| assemble | `p4_assemble.py` via `assemble_2box.sh` | official non-expert shards (minus what EXL3 replaces) + EXL3 files + the official Engram shards hardlinked + config with the plugin's quantization block | TBD |
-| fidelity | `p4_kld.py` | KL vs the native model, top-1 agreement, NLL, per domain, on the panel, with the same reference implementation for every build (also scores other EXL3 packs: `--exl3-ckpt`) | TBD |
+| dense pass (optional) | `p4_dense.py` | input Hessians of wq_a + wkv (one, shared), wq_b, wo_a (per head group), wo_b, shared expert, and the head; EXL3 encode | ~1 h 23 min on 2 boxes (v3 1 h 22 min, 1017 1 h 24 min) |
+| assemble | `p4_assemble.py` via `assemble_2box.sh` | official non-expert shards (minus what EXL3 replaces) + EXL3 files + the official Engram shards hardlinked + config with the plugin's quantization block | ~14 min (1017) |
+| fidelity | `p4_kld.py` | KL vs the native model, top-1 agreement, NLL, per domain, on the panel, with the same reference implementation for every build (also scores other EXL3 packs: `--exl3-ckpt`) | ~25 min a build on the panel, ~13 min on the IFEval-reply panel, one box each |
 
 Build v3 (shipped Oct 11) runs the same passes on `cal_v3`: pass 0 with `--index` (per-domain statistics; their
 token-weighted merge re-allocates plan v2 exactly), `p4_merge_stats.py` (importance as a domain mix: the eight panel
@@ -112,7 +112,7 @@ only the experts whose K changed (unchanged ones come from an assembled checkpoi
 that variant; `--index --domain-weights` weights the Hessians by domain.
 
 On top of the v3 experts, the shipping dir (`dsv41-recipe-exl3-v3b-dk5-h4-dx3`) is built by hardlink variants, each
-gated (LOG Oct 11):
+gated:
 
 | step | script | gate |
 |---|---|---|
@@ -121,6 +121,32 @@ gated (LOG Oct 11):
 | drafter dense K5 | `p4_drafter.py` on an HCAP capture + `p4_drafter_variant.py` | target output identical, acceptance held |
 | drafter routed experts K3 | `p4_drafter_experts.py` (layer-level Hessian = the drafter's captured shared-expert input; Gaussian-sample prior for the down projection) + `p4_drafter_experts_variant.py` | set b tok/s up on code and prose, target output identical (24/24) |
 | depth table | `scripts/bench/depth_sweep.sh` at fixed depths 0-5 on the final dir (prints the `VLLM_DSPARK_ROUND_MS` table) | re-measured whenever kernels or weights change |
+
+Build 1017 (Oct 18) rebuilds every weight from `deepseek-ai/DeepSeek-V4.1-Flash-1017` @ 1bae0e10 with v3's pipeline,
+step for step: the passes above in order, then the same gated variants. 1017 keeps 2cba9e42's
+config, tokenizer and tensor layout, so the image, patches, kernels, launcher, `cal_v3` and both panels carry over.
+Every weight changed, the Engram shards 47 / 48 included, so pass 1 is a full encode (`--reuse` has nothing to reuse)
+and the Engram shards come from the 1017 repo. Pass 0 and the sensitivity re-ran on 1017: its experts read ~1.35x more
+sensitive to the same relative noise (mean alpha 1.855 against 1.400, `data/alpha_sensitivity_1017.json`; only layer 4
+reads lower). The allocation with plan v3's exact settings (`data/plans/plan_1017_270.json`: 2.70 bpw, 2.90 decode
+cap, 85.75 GiB a rank) gives K2 / K3 / K4 / K5 = 6,183 / 7,637 / 1,505 / 35 experts, 762 of 15,360 on a different K
+than plan v3. Pass 1 encodes 6.83 s per K2 expert and 4.43 s per K3 / K4 expert, so 17.5-18 min a layer on two boxes
+where K3 dominates and ~23.5 min on the K2-heavy layers 25-36. At equal bits 1017's KLD runs higher, so v3's absolute
+caps (taken from Mia's 2cba9e42 pack) don't carry over: the gates take theirs from a Mia-layout 1017 pack
+(`LibertAIDAI/DeepSeek-V4.1-Flash-1017-EXL3-2.9bpw` @ c178a012) scored on the same panel. The dense K4 set must stay
+within 10% of the K5 set and under that pack's KLD, and the K4 head under 0.932x that pack's (v3's ratio to Mia's 0.0295).
+
+What the 1017 build took and measured (Oct 18-19): pass 1 16.2 h of wall time (06:53 -> 23:05, ~2 h of it lost to a
+frozen node; 18-24 min a layer on two boxes, with 15-18 encoded solo on one), the dense pass 1 h 24 min, assembly
+14 min. The variant tools swap dense-only files, so the assembled dir is turned into v3's layout first
+(`p4_link_variant.py`: pass 1's part files hardlinked, the dense set in its own file) before `p4_dense_variant.py`,
+`p4_head_variant.py` and the drafter variants run. Panel KLD vs native 1017: 1017b-h4 0.0243, 1017b 0.0237, 1017r
+0.0219, LibertAIDAI's pack 0.0304, so the rule picks dense K4 + head K4 again, with the same numbers as v3 on 2cba9e42 even
+though 1017's experts read more sensitive. The speed side of that pick, measured afterwards with each composition's own
+depth table in one session: dense K5 + head K4 (KLD 0.0227) 94.8 / 54.4 / 138.6 tok/s, dense K5 + head K6 (0.0219)
+95.1 / 56.7 / 135.3, the shipping dir 100.4 / 59.0 / 142.1 (`data/speed/variants_1017`). Drafter capture (36 prompts on an eager serve) 10 min, its encode 30 min.
+The shipping dir `dsv41-recipe-exl3-1017b-dk5-h4-dx3` decodes at v3's speed (set b 100.7 / 59.2 / 141.3 vs v3's
+103.0 / 58.0 / 142.6 the same hour), and every suite (HumanEval+, MBPP+, IFEval) sits within noise of native 1017 (BENCHMARKS.md).
 
 ## 4. Serve
 

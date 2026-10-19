@@ -1,0 +1,4 @@
+spark MemAvailable after load 8 GiB
+spark2 MemAvailable after load 9 GiB
+spark MemAvailable after the ladder 7 GiB
+spark2 MemAvailable after the ladder 7 GiB

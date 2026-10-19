@@ -19,6 +19,13 @@ Every number with its method and its raw file. Two DGX Sparks (GB10), tensor par
 
 | build | code | prose | structured | raw |
 |---|---|---|---|---|
+| **1017 build** (DeepSeek-V4.1-Flash-1017), 9 reps, same session as the next row | **100.7** (100.4-101.1) | **59.2** (59.1-59.5) | **141.3** (140.5-141.7) | `data/speed/r1017_setb9` |
+| v1.1 build (2cba9e42) rerun in the same session, 9 reps | 103.0 (102.4-103.6) | 58.0 (57.7-58.2) | 142.6 (140.5-143.2) | `data/speed/r1017_setb9` |
+| **1017 build**, Oct 19 same-box session, two fresh boots, 9 reps each | **101.1 / 100.9** | **59.3 / 59.1** | **142.5 / 142.5** | `data/speed/samebox_1017` |
+| TensorFold `8e0966e2` + object-oriented-architects 1017 2.7 bpw pack (lucataco's settings), same session, two boots, 9 reps each | 99.5 / 98.6 | 59.1 / 58.2 | 143.4 / 140.8 | `data/speed/samebox_1017` |
+| **1017 build**, Oct 19 variant session (control), fresh boot, 9 reps | **100.4** (100.1-100.9) | **59.0** (58.7-59.3) | **142.1** (140.5-143.4) | `data/speed/variants_1017` |
+| same experts, dense K5 + head K4 (KLD 0.0227, not shipped), its own depth table, same session | 94.8 (94.0-95.3) | 54.4 (54.2-54.6) | 138.6 (137.9-139.0) | `data/speed/variants_1017` |
+| same experts, dense K5 + head K6 (KLD 0.0219, not shipped), its own depth table, same session | 95.1 (94.6-95.5) | 56.7 (56.6-56.8) | 135.3 (134.9-136.0) | `data/speed/variants_1017` |
 | **this build**, 9 reps | **103.0** (102.4-103.4) | 58.3 (58.1-58.6) | **141.3** (140.8-142.1) | `data/speed/slowmode_servemode` |
 | this build, the speed-suite run | 102.2 | 58.1 | 142.6 | `data/speed/ours_v3_full` |
 | this build, image rebuilt from this repo by `install.sh`, fresh boot | 102.2 | 58.2 | 141.5 | `data/speed/release_v4` |
@@ -79,6 +86,54 @@ rep finds Engram's rows cold.
 | Oct 11 20:40 | 101.0 / 55.7 / 139.7 | head K4, the depth table re-measured |
 | Oct 11 23:12 | 102.5 / 57.5 / 141.3 | the drafter's routed experts on EXL3 K3 |
 | Oct 12 00:23 | **103.0 / 58.3 / 141.3** | the depth table re-measured on that build; the page-cache guard off while serving |
+
+## The 1017 build: fidelity and suites
+
+Same pipeline, plan settings and composition as the build below, on `deepseek-ai/DeepSeek-V4.1-Flash-1017` @
+`1bae0e10`; scored against native 1017 on the same panel, and against LibertAIDAI's Mia-layout 1017 pack, the first 1017 EXL3 pack on Hugging Face
+(`LibertAIDAI/DeepSeek-V4.1-Flash-1017-EXL3-2.9bpw` @ `c178a012`, every EXL3 tensor it ships overlaid; the weights are the
+same at `9a85740a`, Oct 19). The
+IFEval-reply panel is 300 IFEval prompts with native replies (116,318 scored positions).
+
+| | 1017 build | LibertAIDAI 1017 2.9 bpw |
+|---|---|---|
+| KLD, mean | **0.0243** | 0.0304 |
+| KLD, 8 domains weighted equally | **0.0405** | 0.0454 |
+| top-1 agreement | **95.47%** | 94.76% |
+| perplexity (native 1.6005) | 1.6159 | 1.6155 |
+| domains closer to native | 7 of 8 | multilingual (0.0571 vs 0.0697) |
+| IFEval-reply panel KLD / top-1 | 0.1199 / 91.37% | **0.1135 / 91.44%** |
+| raw | `data/kld/ours_1017_ship_on_our_panel.json`, `..._on_ifeval_panel.json` | `data/kld/libertai_1017_29bpw_on_*.json` |
+
+| suite | native 1017 | 1017 build | paired p |
+|---|---|---|---|
+| HumanEval+ (164), base / plus | 96.95 / 90.24 | 96.34 / 90.24 | 1.000 / 1.000 |
+| MBPP+ (378), base / plus | 91.53 / 77.25 | 89.68 / 76.19 | 0.143 / 0.523 |
+| IFEval (541), prompt strict / loose | 90.39 / 92.05 | 89.09 / 91.13 | 0.281 / 0.442 |
+
+No suite differs significantly from native 1017; IFEval prompt strict sits 1.5 points above the 2cba9e42 build's
+(87.6). Native 1017 ran on OpenRouter's FP8 providers (`data/evals/native_1017_openrouter/`). Release gates on the
+1017 build: API checks 14 of 14, needles 3 of 3 at 8K / 32K / 64K / 128K with decode 79.0 / 80.9 / 78.1 / 84.8 tok/s
+after the prompt, 8 / 9 GiB free per box after load (`data/gates/r1017/`).
+
+We scored one more 1017 pack on both panels with the same harness, every EXL3 tensor it ships overlaid: the
+[object-oriented-architects 2.7 bpw pack](https://huggingface.co/object-oriented-architects/DeepSeek-V4.1-Flash-1017-EXL3-2.7bpw-TensorFold)
+@ `cdb167c4` (routed experts made with this recipe on replies written by 1017, every other tensor LibertAIDAI's; the
+TensorFold side of the same-box speed test): KLD 0.0232 (domains weighted equally 0.0390), top-1 95.65%, perplexity
+1.6146; IFEval-reply panel 0.1201 / 91.31% (`data/kld/ooa_1017_27bpw_on_*.json`). It is closer to native than this
+build on 7 of the 8 domains (multilingual even); this build's experts with the dense set at K5 and the head at K6
+(1017r, below) are closer than it on all 8.
+
+Two more 1017 packs report KLD on this panel, both made with this recipe (their numbers, not rerun here):
+[HeNryous's 2.75 bpw build](https://huggingface.co/HeNryous/DeepSeek-V4.1-Flash-1017-EXL3-2.75bpw-DGX-Spark), with
+the dense set at K5 and the head at K6, 0.0201 / 95.96% top-1, and
+[0xSero's 2.7 bpw build](https://huggingface.co/0xSero/DeepSeek-V4.1-Flash-1017-EXL3-2.7bpw), 0.0304 / 94.95%. The
+dense and head bits are most of the gap to the first: our experts with the dense set at K5 and the head at K6 (1017r)
+measure 0.0219 / 95.75%, with the dense set at K5 and the head at K4 0.0227 / 95.64%, and HeNryous reports 0.0225 for
+theirs with both at K4. This build keeps K4 / K4 for decode speed. Measured in one session on these boxes, each with
+its own depth table, dense K5 adds ~1 ms a verify round and the K6 head ~1 ms more: 94.8 / 54.4 / 138.6 and 95.1 /
+56.7 / 135.3 tok/s against this build's 100.4 / 59.0 / 142.1, so both heavier compositions run slower than the
+TensorFold setup above while scoring closer to native (`data/speed/variants_1017`).
 
 ## Fidelity on our panel
 

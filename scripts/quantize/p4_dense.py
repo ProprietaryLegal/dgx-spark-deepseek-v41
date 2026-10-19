@@ -177,7 +177,7 @@ def encode_head(s, last_blk, targets, work: str, seed: int, say) -> None:
     w = s.ckpt.get("head.weight", s.device).float()        # [vocab, dim]
     H0 = (H / n).clone()
     # the raw sum and row count (hcap.py's format), before exllamav3 finalizes it in place: a later head encode at
-    # another K needs only this file, not a full calibration stream (LOG Oct 11 12:15)
+    # another K needs only this file, not a full calibration stream
     torch.save({"H": H.cpu(), "rows": n}, os.path.join(targets[0][1], "head_H.pt"))
     for i, (k, out_dir) in enumerate(targets):
         t1 = time.time()

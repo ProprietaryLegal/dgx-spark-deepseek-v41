@@ -6,7 +6,8 @@ DGX Sparks unless a line says otherwise.
 ## Not measured yet
 
 - **A long agent soak.** A 2-hour agent run with restarts is the last stability gate.
-- **Image input.** `TEXT_ONLY=0` loads the vision tower; no image test has run on this build.
+- **Image input.** `TEXT_ONLY=0` loads the vision tower. One basic test on the 1017 build (Oct 19): a generated PNG,
+  left half red and right half blue, answered "Red, blue." No image benchmark or broader test yet.
 - **Power and efficiency.** Not measured.
 - **The wheel compiles inside `install.sh`.** `install.sh` rebuilt the three images from this repo and copied the
   serving image to the second Spark; its patch list, vLLM sources and plugin hash the same as the image behind the
@@ -16,6 +17,15 @@ DGX Sparks unless a line says otherwise.
 
 ## Weaker than the best build we measured
 
+- **1017 build, instruction-reply text:** on the IFEval-reply panel (300 IFEval prompts with native replies) the
+  LibertAIDAI 1017 EXL3 2.9 bpw pack sits closer to native than ours, 0.1135 against 0.1199 KLD, and multilingual is its
+  closer domain on the main panel (0.0571 against 0.0697); ours is closer on the other 7 domains and overall (0.0243
+  against 0.0304). IFEval itself stays within noise of native 1017 (89.09 against 90.39, p = 0.28). No dense or head
+  composition closes the panel gap: 1017b (head K5) reads 0.1188 and 1017r (dense K5, head K6) 0.1147, above theirs on
+  KLD but ahead on top-1 (91.61% against 91.44%), so the gap sits in the experts' encode; a calibration change and a new
+  pass 1 would be the lever.
+- **1017 build, MBPP:** the softest suite, 1-2 points under native 1017 (base 89.68 against 91.53, p = 0.14; plus
+  76.19 against 77.25, p = 0.52), within noise.
 - **Prose decode:** 58.3 tok/s against 62.1 for TensorFold v0.6.0 on the same boxes (9-rep medians, 94%). Prose drafts less well, so
   a round's fixed cost weighs more; the fixed cost is the lever.
 - **Prefill:** 2,090 / 2,092 tok/s at 8K / 32K since v1.1 (TensorFold's grouped EXL3 prompt kernels for the routed
@@ -46,6 +56,20 @@ fell a point (48.3% against 49.3%) and the panel KLD rose to 0.0250 from 0.0243,
   serving path only needs `MODEL_DIR` and `~/dsv41_recipe`.
 - **Upstream.** Patches 0001 and 0003 carry upstream vLLM PRs #56509 and #58560 (the latter merged after our pin). The
   rest are ours; none is proposed upstream yet.
+- **The KLD harness loads a layer, then computes it.** `p4_kld.py` streams the model layer by layer, and each layer's
+  weights and Engram rows load serially with its compute: during the 1017 reference runs the GPUs averaged 56-60%
+  busy, a third of the 1 s samples read under 20%, at 44 W against 80-90 W under pass 1 (Oct 19). Prefetching the
+  next layer during the current one would cut a KLD stage by roughly a quarter. It changes the quality gate's
+  harness, so it goes in with an A/B against these numbers (same panel, bit-identical KLD), not mid-build.
+- **`DOCKER_ENV` values reach the remote shell unquoted.** `dsv41_tp2.sh` adds each entry as `-e KEY=VALUE` to a
+  `docker run` that runs through ssh, so a value with glob characters (`[0-9]`, parentheses, `|`) breaks on a box
+  whose login shell is zsh ("no matches found"). Quote such a value inside DOCKER_ENV (`KEY='...'`), as
+  `hcap_drafter.sh` does; a launcher-side fix (`printf %q` per entry) is open.
+- **DeepSeek's encoder fix of Oct 16-17 is not in the image.** DeepSeek changed the reference `encoding/` in both repos
+  (launch `314113f`, the 1017 release): a tool result no longer opens a new user turn, so the reasoning before a tool
+  call is kept, and a literal image token in text is rejected. vLLM PRs #62196 / #62199 / #62200 port it (open on
+  Oct 18). Without it, a multi-turn tool conversation in thinking mode sent with no `tools` field loses its earlier
+  reasoning; single-turn prompts (the evals, set b) and requests that declare tools encode the same.
 - **Calibration data.** The exact conversations are in `data/caldata/`: `conversations.jsonl` (500 seeded prompts with
   the native model's answers: 301 for calibration, the 199 of the KLD panel) and `instruct_v3.jsonl` (the 392 held-out
   instruction, chat, writing and multilingual prompts of build v3). The generator samples, so rerunning it gives new

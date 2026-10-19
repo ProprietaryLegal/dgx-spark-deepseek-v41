@@ -14,7 +14,8 @@ wo_a stays FP8 (its grouped FP8 path).
 
   python3 p4_drafter.py /official_ckpt /hcap_dir /out.safetensors [--k 5] [--k-map main_proj=6,attn.wq_b=5]
 Writes mtp.<i>.<module>.{trellis,suh,svh,mul1} under the checkpoint's names (the plugin's dense loader convention)
-and <out>.json with each matrix's Hessian-weighted relative error.
+and <out>.json with each matrix's Hessian-weighted relative error. --no-main-proj leaves main_proj FP8, as the
+shipping build has it (its dk5 predates the main_proj fix), so a capture without main_proj's ~0.9 GB H is enough.
 """
 import argparse
 import glob
@@ -87,6 +88,7 @@ def main():
     ap.add_argument("--k", type=float, default=5)
     ap.add_argument("--k-map", default="")
     ap.add_argument("--seed", type=int, default=4711)
+    ap.add_argument("--no-main-proj", action="store_true", help="leave mtp.0.main_proj FP8 (the shipping composition)")
     a = ap.parse_args()
     from exllamav3.modules.quant.exl3_lib.quantize import quantize_exl3, quantize_exl3_batch
     kmap = {}
@@ -146,7 +148,7 @@ def main():
         seed += 10
         print(f"mtp.{i}: " + ", ".join(f"{k.split('.', 2)[2]} {100 * v['rel_err']:.2f}%"
                                          for k, v in metrics.items() if k.startswith(base)), flush=True)
-    if any(k.startswith("mtp.0.main_proj") for k in wmap):
+    if not a.no_main_proj and any(k.startswith("mtp.0.main_proj") for k in wmap):
         H, n = hessian(a.hcap, "main_proj", False)
         w = fp32(a.ckpt, wmap, "mtp.0.main_proj")
         _, _, t = quantize_exl3(w.t().contiguous(), hd(H, n, "main_proj"), quant_args(K("main_proj"), seed, work),

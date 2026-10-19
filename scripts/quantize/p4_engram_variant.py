@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A model-dir variant whose Engram projections (layers.<i>.engram.wkv) run on EXL3 (p4_engram.py output), by hardlinks
 only: every file of the source dir hardlinked (V4.1's shards 47 / 48 hold the FP8 wkv next to the 101.5 GB Engram
-embedding tables, so rewriting them is out: LOG Oct 11 12:40), the EXL3 tensors linked in as model-exl3-engram.safetensors,
+embedding tables, so rewriting them is out), the EXL3 tensors linked in as model-exl3-engram.safetensors,
 the index extended with them and config.json given exl3_moe.dense.engram.wkv = K. The FP8 wkv tensors stay in their
 shards and in the index: they still stream in at load, into the empty sink parameters the plugin's EXL3 engram.wkv method
 registers (vllm_exl3_moe/dense.py, plugin of Oct 11 12:45 on; an older plugin fails the load, it does not misload).

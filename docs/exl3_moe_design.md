@@ -169,7 +169,7 @@ Abstract: `get_name`, `get_supported_act_dtypes`, `get_min_capability` (classmet
 
 **Post-load:** device pointer tables (int64, physical order) for gate/up/down x trellis/suh/svh, one `GroupTables` view per K group, the `perm` tensor, process-wide coop scratch (`rows_max = 32`, 192 slots: ~10 MB) and `exl3_moe` temp buffers (`C = 6, R = 256`: ~38 MB), one eager priming launch per group and kernel, `malloc_trim` (UMA).
 
-**Layers left native:** a plan may omit layers; they keep `Mxfp4MoEMethod` (their MXFP4 tensors must then stay in the checkpoint). Useful for the quality ladder ("which layer breaks", PLAN section 5).
+**Layers left native:** a plan may omit layers; they keep `Mxfp4MoEMethod` (their MXFP4 tensors must then stay in the checkpoint). Useful for the quality ladder ("which layer breaks").
 
 ---
 
@@ -245,7 +245,7 @@ The memory budget from the official safetensors headers leaves ~82 GiB per node 
 
 ## 8. Decode cost model on GB10 (routed experts only)
 
-Assumptions: 2.7 bpw trellis (sign vectors add 0.4%), whole expert = 3 x 5120 x 2304 x 2.7 / 8 = **11.94 MB**, half per rank at TP=2; routing uniform and independent across tokens (DeepSeek's bias-balanced routing is close to uniform over a window; real token-to-token correlation lowers the unique counts, measure them); 273 GB/s per box (measured figure, vault `project_spark_bandwidth_contradiction`); assumed: EXL3 trellis decode is ALU-light at 2-5 bits, so bandwidth-bound if the grid is full (the bench in `test_kernels_gpu.py` checks it). Unique experts per layer for n tokens: E[U] = 384 x (1 - (1 - 6/384)^n), Monte Carlo in `pkg: tools/cost_model.py` (rerun with other bpw / bandwidth).
+Assumptions: 2.7 bpw trellis (sign vectors add 0.4%), whole expert = 3 x 5120 x 2304 x 2.7 / 8 = **11.94 MB**, half per rank at TP=2; routing uniform and independent across tokens (DeepSeek's bias-balanced routing is close to uniform over a window; real token-to-token correlation lowers the unique counts, measure them); 273 GB/s per box (measured); assumed: EXL3 trellis decode is ALU-light at 2-5 bits, so bandwidth-bound if the grid is full (the bench in `test_kernels_gpu.py` checks it). Unique experts per layer for n tokens: E[U] = 384 x (1 - (1 - 6/384)^n), Monte Carlo in `pkg: tools/cost_model.py` (rerun with other bpw / bandwidth).
 
 | tokens per step n (DSpark k = n-1) | unique experts per layer | per rank per step, channel split | time @ 273 GB/s | time @ 80% (218 GB/s) | expert-parallel slowest rank @ 273 GB/s |
 |---|---|---|---|---|---|
