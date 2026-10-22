@@ -1,0 +1,195 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0021 + 0023-0025 (0023-0025 touch none
+of its files, so 0001-0021 alone take it too).
+The DSpark drafter's own lm_head, opt-in (VLLM_DSPARK_OWN_HEAD=1). V4.1's drafter shares the target's lm_head module,
+so an EXL3 head is read twice a verify round, by the target's verify forward and by the draft forward: a K6 head
+(~248 MB a rank at TP=2) costs ~1.0 ms a round over K4 at every depth. The drafter only proposes tokens, and its other
+compression (experts K3, dense K5) cost no acceptance, so the target keeps its K6 head for quality and the drafter reads
+a lighter encode of the same matrix (expected ~0.35-0.5 ms a round with a K4 drafter head on a K6 build).
+With the flag, DSparkDeepseekV4ForCausalLM builds its head under the prefix "mtp_head" with the drafter's quant config.
+If the config gives that prefix a method (the recipe's vllm_exl3_moe plugin: Exl3HeadMethod at exl3_moe.drafter_head_k,
+which scripts/quantize/p4_drafter_head_variant.py writes next to the mtp.head.* tensors), the drafter keeps it
+(keeps_own_lm_head: load_dspark_model skips the aliasing, whose _should_share would compare a .weight an EXL3 head does
+not have), and load_weights fills it from mtp.head.{trellis,suh,svh,mul1|mcg} through the method's loaders, refusing to
+start when a declared piece is missing. Without the flag the drafter builds today's placeholder and shares the target's
+head, byte for byte as before; with it but no method for the prefix (no drafter head in the checkpoint) it warns and
+does the same. mtp.head.* tensors are skipped whenever the head is shared (the target's weight mapper already drops
+every mtp.* name). The own head has the placeholder's geometry (vocab 129,280, padding 64, the TP group), so each rank
+holds the target head's vocab columns: _vocab_shard, the local draft argmax (0012) and the Markov cache rows (0011) read
+the same columns. Verification is untouched: greedy rounds accept against the target's own argmax and sampled rounds use
+the distribution the drafter sampled from, so outputs keep the target's distribution and only acceptance can move.
+Memory: +~165 MB a rank for a K4 drafter head. Test: patches/tests/test_dspark_own_head.py (CPU, in the serve image).
+
+diff --git a/vllm/models/deepseek_v41/nvidia/dspark.py b/vllm/models/deepseek_v41/nvidia/dspark.py
+index 9c35c85..207760e 100644
+--- a/vllm/models/deepseek_v41/nvidia/dspark.py
++++ b/vllm/models/deepseek_v41/nvidia/dspark.py
+@@ -35,10 +35,11 @@ from vllm.model_executor.layers.fused_moe import (
+     fused_moe_make_expert_params_mapping,
+ )
+ from vllm.model_executor.layers.layernorm import RMSNorm
+-from vllm.model_executor.layers.linear import ReplicatedLinear
++from vllm.model_executor.layers.linear import ReplicatedLinear, UnquantizedLinearMethod
+ from vllm.model_executor.layers.logits_processor import LogitsProcessor
+ from vllm.model_executor.layers.vocab_parallel_embedding import (
+     ParallelLMHead,
++    UnquantizedEmbeddingMethod,
+     VocabParallelEmbedding,
+ )
+ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+@@ -70,6 +71,13 @@ logger = init_logger(__name__)
+ # fp4 experts register ``.weight_scale``; block-fp8 experts ``.weight_scale_inv``.
+ _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.w[123]\.scale$")
+ 
++# The drafter's own lm_head (VLLM_DSPARK_OWN_HEAD=1): checkpoint pieces
++# mtp.head.{trellis,suh,svh,mul1|mcg}, the target head's head.* convention (patch 0007)
++# under mtp., loaded into lm_head. The head is built under OWN_HEAD_PREFIX, the name a
++# quantization config keys its method on (vllm_exl3_moe: exl3_moe.drafter_head_k).
++_OWN_HEAD_PIECES_RE = re.compile(r"^mtp\.head\.(trellis|suh|svh|mul1|mcg)$")
++OWN_HEAD_PREFIX = "mtp_head"
++
+ 
+ class DSparkDeepseekV4Model(nn.Module):
+     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+@@ -281,9 +289,14 @@ def _insert_context_kv(
+ 
+ class DSparkDeepseekV4ForCausalLM(nn.Module):
+     # Draft weights ship in the target checkpoint (mtp.*) without embed/head, so
+-    # load_dspark_model always aliases the target's.
++    # load_dspark_model aliases the target's. The exception is opt-in: with
++    # VLLM_DSPARK_OWN_HEAD=1 on a checkpoint that carries the drafter's own head
++    # (mtp.head.*), __init__ builds it and sets keeps_own_lm_head, and load_dspark_model
++    # keeps it. has_own_lm_head stays False: it asks for _should_share's weight
++    # comparison, and a quantized head (EXL3: trellis pieces) has no .weight to compare.
+     has_own_embed_tokens = False
+     has_own_lm_head = False
++    keeps_own_lm_head = False
+     # Full-vocab draft: draft ids are target ids, no remapping needed.
+     draft_id_to_target_id = None
+ 
+@@ -302,12 +315,15 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
+         self.model = DSparkDeepseekV4Model(
+             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+         )
+-        # Shared with the target (aliased by the speculator's load utility).
+-        self.lm_head = ParallelLMHead(
+-            self.config.vocab_size,
+-            self.config.hidden_size,
+-            prefix=maybe_prefix(prefix, "lm_head"),
+-        )
++        # The drafter's own head (VLLM_DSPARK_OWN_HEAD=1), if the checkpoint has one.
++        self.lm_head = self._own_lm_head(prefix)
++        if self.lm_head is None:
++            # Shared with the target (aliased by the speculator's load utility).
++            self.lm_head = ParallelLMHead(
++                self.config.vocab_size,
++                self.config.hidden_size,
++                prefix=maybe_prefix(prefix, "lm_head"),
++            )
+         self.logits_processor = LogitsProcessor(self.config.vocab_size)
+         # Cached Markov bias rows (ops/markov_cache.py), built after loading when
+         # VLLM_DSPARK_MARKOV_CACHE names a token list.
+@@ -317,6 +333,40 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
+         # all-gathering the full draft logits and adding a full-vocab bias on every rank.
+         self._markov_cache_local = None
+ 
++    def _own_lm_head(self, prefix: str) -> ParallelLMHead | None:
++        """VLLM_DSPARK_OWN_HEAD=1: the drafter's own lm_head, from the checkpoint's
++        mtp.head.* pieces (another quantization of the target's [hidden -> vocab]
++        matrix, e.g. EXL3 K4 under a K6 target head: the drafter only proposes, the
++        target verifies), when the quant config gives OWN_HEAD_PREFIX a method. None
++        otherwise, which keeps the shared head. Built like the placeholder it replaces
++        (same vocab, padding and TP group), so its vocabulary shard is the target
++        head's: _vocab_shard, the local draft argmax and the Markov cache read the
++        same columns."""
++        if os.environ.get("VLLM_DSPARK_OWN_HEAD") != "1":
++            return None
++        head = ParallelLMHead(
++            self.config.vocab_size,
++            self.config.hidden_size,
++            quant_config=self.quant_config,
++            prefix=maybe_prefix(prefix, OWN_HEAD_PREFIX),
++        )
++        unquantized = (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
++        if type(head.quant_method) in unquantized:
++            # no method: the checkpoint declares no drafter head
++            logger.warning(
++                "VLLM_DSPARK_OWN_HEAD=1, but the quant config has no method for %s "
++                "(no drafter head in this checkpoint): the drafter shares the "
++                "target's lm_head",
++                head.prefix,
++            )
++            return None
++        self.keeps_own_lm_head = True
++        logger.info(
++            "DSpark drafter: its own lm_head (%s, mtp.head.*), not the target's",
++            type(head.quant_method).__name__,
++        )
++        return head
++
+     # --- Hooks used by the speculator -------------------------------------
+ 
+     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+@@ -476,7 +526,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
+         """Load the ``mtp.{0,1,2}.*`` draft weights from the target checkpoint.
+ 
+         Non-mtp weights (embed/head/main layers) belong to the target model and
+-        are skipped here. ``embed_tokens``/``lm_head`` are aliased from the target.
++        are skipped here. ``embed_tokens``/``lm_head`` are aliased from the target,
++        except a drafter head of its own (``keeps_own_lm_head``: ``mtp.head.*``).
+         """
+         first_layer = self.model.layers[0]
+         use_native_mega_moe = first_layer.ffn.use_native_mega_moe
+@@ -598,6 +649,18 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
+ 
+         if self.model.confidence_head is not None and not loaded_confidence_head:
+             self.model.confidence_head = None
++        if self.keeps_own_lm_head:
++            # the quant config declared the drafter's head, so its tensors must all be
++            # here: drafting from an unloaded head would only cost acceptance, silently
++            missing = {
++                f"lm_head.{n}" for n, _ in self.lm_head.named_parameters()
++            } - loaded_params
++            if missing:
++                raise ValueError(
++                    "VLLM_DSPARK_OWN_HEAD=1: the drafter's own lm_head has a quant "
++                    "method but the checkpoint has no mtp.head.* tensors for "
++                    f"{sorted(missing)}"
++                )
+         self.process_weights_after_loading()
+         self._maybe_build_markov_cache()
+         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
+@@ -625,10 +688,16 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
+         self._finalize_attn()
+ 
+     def _remap_dspark_name(self, name: str) -> str | None:
+-        """Map a checkpoint ``mtp.{i}.*`` name to this model's parameter path.
++        """Map a checkpoint ``mtp.{i}.*`` name (or a ``mtp.head.*`` piece of the
++        drafter's own head) to this model's parameter path.
+ 
+         Returns None for non-mtp weights (owned by the target model).
+         """
++        own = _OWN_HEAD_PIECES_RE.match(name)
++        if own is not None:
++            # the drafter's own head: loaded when built (VLLM_DSPARK_OWN_HEAD=1), else
++            # skipped like any tensor the drafter does not use
++            return f"lm_head.{own.group(1)}" if self.keeps_own_lm_head else None
+         m = re.match(r"mtp\.(\d+)\.(.*)", name)
+         if m is None:
+             return None
+diff --git a/vllm/v1/worker/gpu/spec_decode/dspark/utils.py b/vllm/v1/worker/gpu/spec_decode/dspark/utils.py
+index 489d0da..d70f6af 100644
+--- a/vllm/v1/worker/gpu/spec_decode/dspark/utils.py
++++ b/vllm/v1/worker/gpu/spec_decode/dspark/utils.py
+@@ -124,9 +124,12 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
+         getattr(draft_model_config.hf_config, "draft_vocab_size", None)
+         or draft_model_config.get_vocab_size()
+     )
++    # A drafter that built a head of its own (DeepSeek-V4.1 with VLLM_DSPARK_OWN_HEAD=1)
++    # keeps it: another quantization of the target's matrix, not a copy to deduplicate.
+     if (
+         target_lm_head is not None
+         and draft_output_vocab_size == target_vocab_size
++        and not getattr(draft_model, "keeps_own_lm_head", False)
+         and _should_share(draft_model, "has_own_lm_head", draft_lm_head, target_lm_head)
+     ):
+         if draft_lm_head is not None:

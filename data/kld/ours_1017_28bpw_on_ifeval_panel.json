@@ -1,0 +1,458 @@
+{
+ "positions": 116318,
+ "kld_mean": 0.09799297153949738,
+ "kld_p99": 1.5017324686050415,
+ "top1_agreement": 0.9218177795410156,
+ "nll_native": 0.3983531594276428,
+ "nll_ours": 0.4496229290962219,
+ "tensors": "",
+ "exl3_ckpt": "/home/spark/models/dsv41-recipe-exl3-1017q310r-dk5-dx3-wqb4h5",
+ "dense": "",
+ "overlaid": {
+  "head": "/home/spark/models/dsv41-recipe-exl3-1017q310r-dk5-dx3-wqb4h5",
+  "0": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "1": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "2": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "3": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "4": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "5": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "6": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "7": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "8": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "9": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "10": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "11": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "12": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "13": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "14": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "15": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "16": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "17": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "18": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "19": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "20": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "21": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "22": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "23": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "24": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "25": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "26": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "27": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "28": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "29": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "30": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "31": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "32": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "33": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "34": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "35": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "36": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "37": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "38": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ],
+  "39": [
+   "attn.wo_a",
+   "attn.wkv",
+   "attn.wo_b",
+   "attn.wq_a",
+   "attn.wq_b",
+   "ffn.shared_experts.w1",
+   "ffn.shared_experts.w2",
+   "ffn.shared_experts.w3"
+  ]
+ },
+ "by_domain": {
+  "case": {
+   "kld": 0.09645947528135818,
+   "top1": 0.921073512252042,
+   "positions": 21425
+  },
+  "combination": {
+   "kld": 0.10344244255411005,
+   "top1": 0.9223698781838316,
+   "positions": 9030
+  },
+  "detectable": {
+   "kld": 0.09496928192835405,
+   "top1": 0.9225844205018761,
+   "positions": 29051
+  },
+  "keywords": {
+   "kld": 0.0866892575350566,
+   "top1": 0.9259468271883622,
+   "positions": 15948
+  },
+  "language": {
+   "kld": 0.10148691361950289,
+   "top1": 0.9507786429365962,
+   "positions": 3596
+  },
+  "length": {
+   "kld": 0.10551522535279326,
+   "top1": 0.9153324006425203,
+   "positions": 19299
+  },
+  "punctuation": {
+   "kld": 0.10521941416283034,
+   "top1": 0.9173164097914778,
+   "positions": 5515
+  },
+  "startend": {
+   "kld": 0.1023425222393194,
+   "top1": 0.9193030351694235,
+   "positions": 12454
+  }
+ },
+ "ppl_native": 1.4893699220691508,
+ "ppl_ours": 1.5677209320762149
+}

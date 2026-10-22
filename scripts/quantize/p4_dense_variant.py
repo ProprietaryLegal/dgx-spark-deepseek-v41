@@ -2,7 +2,9 @@
 """A model dir whose dense EXL3 linears and head come from another dense pass (p4_dense.py output), without copying:
 every file of the source dir is hardlinked except its dense and head files; the dense pass's per-layer files are
 hardlinked in as model-exl3-dense-LXX.safetensors and its head as model-exl3-head.safetensors; the index is rewritten;
-config.json gets the new pass's K per module (exl3_moe.dense.k, read from its dense_LXX.json metrics) and head_k.
+config.json gets the new pass's K per module (exl3_moe.dense.k, read from its dense_LXX.json metrics) and head_k; a
+module whose K differs by layer (p4_dense_mix.py --layers) gets its most common K there and the other layers in
+exl3_moe.dense.k_layers {module: {layer: K}} (the plugin's per-layer override).
 The DSpark drafter's EXL3 tensors (model-exl3-mtp.safetensors) and everything else stay as they are.
 
 For the bytes variant of a recipe: the same experts with dense K4 (wo_a K5) and a K5 head, both from one dense pass
@@ -26,22 +28,35 @@ DENSE_KEY = re.compile(r"^layers\.(\d+)\.(.+)\.(trellis|suh|svh|mul1|su|sv)$")
 HEAD_KEY = re.compile(r"^head\.(trellis|suh|svh|mul1|su|sv)$")
 
 
+RIDER_OF = {"attn.wkv": "attn.wq_a", "ffn.shared_experts.w3": "ffn.shared_experts.w1"}
+
+
 def module_k(kmap_keys, dense_dir):
-    """K per config module prefix (e.g. attn.wo_a), from the dense pass's per-layer metrics; uniform across layers."""
-    ks = {}
+    """K per config module prefix (e.g. attn.wo_a) from the dense pass's per-layer metrics: (base K, {prefix: {layer:
+    K}} for the layers that differ from the base). One K per module within a layer (riders included)."""
+    per = {}
     for f in sorted(glob.glob(os.path.join(dense_dir, "dense_L*.json"))):
+        layer = int(re.search(r"dense_L(\d+)\.json$", f).group(1))
         m = json.load(open(f))
         for prefix in kmap_keys:
-            vals = {v["k"] for name, v in m.items() if name == prefix or name.startswith(prefix + ".")}
+            vals = {v["k"] for name, v in m.items() if isinstance(v, dict) and "k" in v and (
+                name == prefix or name.startswith(prefix + ".") or RIDER_OF.get(name.split(".slice")[0]) == prefix)}
             if not vals:
                 continue
-            if len(vals) > 1 or ks.get(prefix, next(iter(vals))) != next(iter(vals)):
-                raise SystemExit(f"{prefix}: K differs across {os.path.basename(f)}'s modules or layers: {vals}, {ks.get(prefix)}")
-            ks[prefix] = next(iter(vals))
-    missing = [p for p in kmap_keys if p not in ks]
+            if len(vals) > 1:
+                raise SystemExit(f"{prefix}: K differs within {os.path.basename(f)}: {vals}")
+            per.setdefault(prefix, {})[layer] = next(iter(vals))
+    missing = [p for p in kmap_keys if p not in per]
     if missing:
         raise SystemExit(f"no K in the dense pass metrics for {missing}")
-    return ks
+    base, over = {}, {}
+    for prefix, by_layer in per.items():
+        vals = list(by_layer.values())
+        base[prefix] = max(set(vals), key=vals.count)
+        diff = {str(l): k for l, k in sorted(by_layer.items()) if k != base[prefix]}
+        if diff:
+            over[prefix] = diff
+    return base, over
 
 
 def main():
@@ -71,7 +86,7 @@ def main():
         if other:
             raise SystemExit(f"{f} also holds {len(other)} other tensors (e.g. {other[:2]}): not a dense-only file")
 
-    new_k = module_k(list(old_k), a.dense)
+    new_k, k_layers = module_k(list(old_k), a.dense)
     head_meta = os.path.join(a.dense, "dense_head.json")
     head_k = json.load(open(head_meta))["k"] if os.path.exists(head_meta) else ex.get("head_k")
 
@@ -86,7 +101,8 @@ def main():
             hits = [group] if group in new_k else []
         if not hits:
             raise SystemExit(f"{key}: no K for module {mod} in {sorted(new_k)}")
-        return new_k[max(hits, key=len)]
+        prefix = max(hits, key=len)
+        return k_layers.get(prefix, {}).get(DENSE_KEY.match(key).group(1), new_k[prefix])
 
     by_file = {}
     for k, f in dwm.items():
@@ -123,10 +139,14 @@ def main():
     with open(os.path.join(a.dst, "model.safetensors.index.json"), "w") as fh:
         json.dump(index, fh, indent=1)
     ex["dense"]["k"] = new_k
+    if k_layers:
+        ex["dense"]["k_layers"] = k_layers
+    else:
+        ex["dense"].pop("k_layers", None)
     ex["head_k"] = head_k
     with open(os.path.join(a.dst, "config.json"), "w") as fh:
         json.dump(cfg, fh, indent=2)
-    print(f"variant {a.dst}: dense K {new_k}, head K{head_k}")
+    print(f"variant {a.dst}: dense K {new_k}, per-layer {k_layers or '-'}, head K{head_k}")
 
 
 if __name__ == "__main__":

@@ -19,8 +19,14 @@ def keys(path):
 
 
 def n_experts(d, l):
+    """Experts layer l holds: those with tensors in its part files, plus, in a partial run (--reuse), those a part's
+    json lists as reused (they stay in the reuse checkpoint; the json is written after the part's tensors, so a part
+    the stop cut short adds none)."""
     files = sorted(glob.glob(os.path.join(d, f"layer_{l:02d}.part*.safetensors")))
-    return len({k.split(".")[4] for f in files for k in keys(f) if ".ffn.experts." in k}), len(files)
+    have = {k.split(".")[4] for f in files for k in keys(f) if ".ffn.experts." in k}
+    for j in glob.glob(os.path.join(d, f"layer_{l:02d}.part*.json")):
+        have |= {e for e, m in json.load(open(j)).get("experts", {}).items() if m.get("reused")}
+    return len(have), len(files)
 
 
 def main():

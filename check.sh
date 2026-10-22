@@ -7,7 +7,7 @@
 set -uo pipefail
 HEAD=${HEAD:-spark}; WORKER=${WORKER:-spark2}
 FAB_IF=${FAB_IF:-enp1s0f0np0}; FAB_HCA=${FAB_HCA:-rocep1s0f0}
-IMAGE=${IMAGE:-dsv41-serve:v4}; PORT=${PORT:-8000}; SERVED=${SERVED:-dsv41}
+IMAGE=${IMAGE:-dsv41-serve:v5}; PORT=${PORT:-8000}; SERVED=${SERVED:-dsv41}
 MODEL_DIR=${MODEL_DIR:-}
 fails=0
 pass() { printf 'PASS  %-8s %s\n' "$1" "$2"; }

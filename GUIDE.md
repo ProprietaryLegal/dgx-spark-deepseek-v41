@@ -43,9 +43,9 @@ It runs, in order (each script also runs alone):
 2. the vLLM wheel for `sm_121` (`scripts/build/run_build_gb10.sh`, a memory-capped CPU compile in the pinned
    build-environment image) and the exllamav3 1.6.0 wheel (`scripts/build/run_build_exllamav3.sh`), each skipped when
    its wheel is already in `wheels/` (`FORCE=1` rebuilds);
-3. `dsv41-recipe:dev`: the wheel + every patch in `patches/` (0001-0008, 0010-0021), each verified in the image by a
+3. `dsv41-recipe:dev`: the wheel + every patch in `patches/` (0001-0008, 0010-0021, 0023-0038), each verified in the image by a
    reverse apply (`scripts/image/build_image.sh`); `dsv41-quant:dev`: + exllamav3 (`build_quant_image.sh`);
-   `dsv41-serve:v4`: + the `vllm_exl3_moe` plugin (`build_serve_image.sh`), the image the launcher runs by default;
+   `dsv41-serve:v5`: + the `vllm_exl3_moe` plugin (`build_serve_image.sh`), the image the launcher runs by default;
 4. the serving image to `PEER` (`docker save | ssh docker load`); it stops if the two image ids differ.
 
 It refuses to start while a GPU container runs on either box: heavy builds and image copies beside GPU work have hung a
@@ -68,7 +68,9 @@ HEAD=<rank0> WORKER=<rank1> MODEL_DIR=/absolute/path/to/dsv41-exl3 ./scripts/lau
 ```
 
 `up` drops the page cache on both boxes, starts rank 1 then rank 0, waits for `/v1/models` and prints MemAvailable per
-node. Expect about 9 minutes to ready and about 9 GiB MemAvailable on each node. Every setting is an environment
+node. Expect about 7 minutes to ready (about 11 on the first boot of a new image, which builds its JIT kernels into
+the mounted cache) and about 6 GiB MemAvailable on each node with the v2.0 build and vision on (text-only, the
+default, keeps about 0.9 GiB more; the v1.x builds leave 8-9). Every setting is an environment
 variable (README, "Launcher settings"); the defaults are the measured-best configuration.
 
 ## 4. Verify

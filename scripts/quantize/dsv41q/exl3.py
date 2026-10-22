@@ -61,16 +61,25 @@ def reconstruct(t: dict, in_features: int, out_features: int) -> torch.Tensor:
     return lin.get_weight_tensor().t()
 
 
+# p4_kld.py --act-qdq: a bf16 -> bf16 round trip through the reference's activation quantizer (act_quant, FP8 with a
+# power-of-two scale per 32 values), applied where the reference's linear() quantizes activations for its FP4 experts.
+ACT_QDQ = None
+ACT_QDQ_H = True       # --act-qdq-scope inputs: the experts' inputs only, not the routing-weighted intermediate
+
+
 def expert_forward_dense(x: torch.Tensor, g: torch.Tensor, w1, w3, w2, limit: float) -> torch.Tensor:
     """Reference Expert.forward semantics (swiglu clamps, routing weight applied before w2) with dense fp16 weights and
-    fp16 activations, i.e. what the EXL3 serving kernels compute. x [n, 5120], g [n] -> [n, 5120] fp32."""
-    xh = x.to(torch.float16)
+    fp16 activations, i.e. what the EXL3 serving kernels compute. x [n, 5120], g [n] -> [n, 5120] fp32. With ACT_QDQ
+    set, the expert's input and the routing-weighted intermediate (cast to bf16 first, as the reference does) take the
+    reference's activation round trip before their GEMMs."""
+    xh = (ACT_QDQ(x.to(torch.bfloat16)) if ACT_QDQ else x).to(torch.float16)
     gate = F.linear(xh, w1).float()
     up = F.linear(xh, w3).float()
     if limit > 0:
         up = up.clamp(-limit, limit)
         gate = gate.clamp(max=limit)
-    h = (F.silu(gate) * up * g.unsqueeze(-1)).to(torch.float16)
+    h = F.silu(gate) * up * g.unsqueeze(-1)
+    h = (ACT_QDQ(h.to(torch.bfloat16)) if ACT_QDQ and ACT_QDQ_H else h).to(torch.float16)
     return F.linear(h, w2).float()
 
 

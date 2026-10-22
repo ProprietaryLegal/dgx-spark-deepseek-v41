@@ -75,7 +75,11 @@ constexpr int MAX_SLOTS = 256;
 #ifndef SMOE_EVICT_FIRST
 #define SMOE_EVICT_FIRST 1                          // weight copies carry an L2 evict-first policy (read once), so they
                                                     // do not push out what the L2 prefetch pulled in for the next dense
-                                                    // kernels: +0.8-1.0% a serve round (LOG Oct 11 07:14); 0 = off
+                                                    // kernels: +0.8-1.0% a serve round (Oct 11); 0 = off
+#endif
+#ifndef SMOE_L2_DISCARD
+#define SMOE_L2_DISCARD 0                           // 1 (EXL3_L2_DISCARD=1, smoe.py): the per-slot outputs ys leave L2
+                                                    // unwritten once a token's sum has read them (down_item)
 #endif
 constexpr int PIPE = SMOE_PIPE;             // k-rows in flight per block
 constexpr int OBI = SMOE_OBI;               // 128-column output blocks per down item
@@ -649,9 +653,15 @@ __device__ __forceinline__ void down_item(const Layer& L, const Call& c, int rc,
         const int hc = (ob0 + o) * 128 + lane * 4;
         float4 sum = make_float4(0.f, 0.f, 0.f, 0.f);
         const int kp = picks(c);
+#if SMOE_L2_DISCARD
+        unsigned live = 0;                       // the picks summed (the same for every lane)
+#endif
         for (int j = 0; j < kp; ++j)             // pick order: the same sum whichever block arrives last
         {
             if (j < c.top_k ? read_id(c, t, j) < 0 : (c.pad && c.pad[t])) continue;
+#if SMOE_L2_DISCARD
+            live |= 1u << j;
+#endif
             const float4 y = __ldcg(reinterpret_cast<const float4*>(c.ys + ((size_t) t * kp + j) * L.H + hc));
             sum.x += y.x; sum.y += y.y; sum.z += y.z; sum.w += y.w;
         }
@@ -661,6 +671,26 @@ __device__ __forceinline__ void down_item(const Layer& L, const Call& c, int rc,
         ov.y = *reinterpret_cast<const uint32_t*>(&hi);
         *reinterpret_cast<uint2*>(c.out + (size_t) t * c.out_stride + hc) = ov;
         if (lane == 0) c.ctr[t * (L.H / 128) + ob0 + o] = 0;
+#if SMOE_L2_DISCARD
+        // The token's per-slot outputs of this 128-column block (one 512-byte piece per summed pick, four 128-byte
+        // lines: ys is 128-byte aligned and its rows are H floats, H a multiple of 128) are dead here, so their dirty L2
+        // lines are dropped instead of written back to DRAM. Why nothing can read a dropped line:
+        //  - writers: each pick's piece was written above by the down block of the run holding that slot, which ran
+        //    __threadfence() before its arrival on this (token, block) counter; this warp's block took the last arrival
+        //    and fenced, so every piece was in L2 before the __ldcg loads above;
+        //  - readers: the sum is the only reader of ys, and a (token, block) is summed once, by this warp (last[u] is
+        //    set for one arrival). Each lane's loads feed the bf16 store above, so they have returned before the lane
+        //    reaches __syncwarp(), which orders all 32 lanes' loads before any lane's discard;
+        //  - the next writer is the next call's down work, which writes only after that call's gate / up rows, and gate /
+        //    up (rot before it, a fused launch at its start) begin with griddepcontrol.wait: after this grid has
+        //    completed (the order the loads and the counter reset above already rely on). A call writes every piece it
+        //    sums (all H columns of each live slot) before reading it, so a dropped line is never read.
+        // Picks not summed (unrouted, padded rows) were not written by this call and are left alone.
+        __syncwarp();
+        const float* yb = c.ys + (size_t) t * kp * L.H + (ob0 + o) * 128;
+        for (int i = lane; i < kp * 4; i += 32)
+            if ((live >> (i >> 2)) & 1u) l2_discard(yb + (size_t) (i >> 2) * L.H + (i & 3) * 32);
+#endif
     }
 }
 
@@ -694,7 +724,7 @@ __global__ void __launch_bounds__(THREADS, 1) smoe_down(const __grid_constant__ 
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// 4. fused: a decode layer's whole MoE phase in one persistent launch (Program P stage P2, NORTH_STAR.md)
+// 4. fused: a decode layer's whole MoE phase in one persistent launch
 //
 // One block per resident slot (THREADS threads, as gu / down), each pulling tasks from one queue, in this order:
 //   setup | shared rot | router rows | shared gate / up | shared down | routed rot || routed gate / up | routed down
@@ -1344,6 +1374,9 @@ void smoe_run(int64_t handle, at::Tensor x, at::Tensor ids, at::Tensor w, at::Te
     c.hs = reinterpret_cast<half*>(hs.data_ptr<at::Half>());
     c.act = reinterpret_cast<half*>(act.data_ptr<at::Half>());
     c.ys = ys.data_ptr<float>();
+#if SMOE_L2_DISCARD
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(c.ys) % 128 == 0, "exl3_smoe: ys not 128-byte aligned (L2 discard)");
+#endif
     c.rt = rt.data_ptr<int>();
     c.ctr = ctr.data_ptr<int>();
     c.pad = nullptr;
@@ -1429,6 +1462,9 @@ void smoe_run_fused(int64_t handle, at::Tensor x, at::Tensor gate_w, at::Tensor 
     c.hs = reinterpret_cast<half*>(hs.data_ptr<at::Half>());
     c.act = reinterpret_cast<half*>(act.data_ptr<at::Half>());
     c.ys = ys.data_ptr<float>();
+#if SMOE_L2_DISCARD
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(c.ys) % 128 == 0, "exl3_smoe: ys not 128-byte aligned (L2 discard)");
+#endif
     c.rt = rt.data_ptr<int>();
     c.ctr = ctr.data_ptr<int>();
     c.pad = nullptr;

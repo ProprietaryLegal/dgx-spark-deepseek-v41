@@ -1,0 +1,11 @@
+{
+ "suite": "ifeval",
+ "serve": "ours",
+ "n": 541,
+ "prompt_strict": 0.9075785582255084,
+ "prompt_loose": 0.9242144177449169,
+ "inst_strict": 0.9376498800959233,
+ "gen_errors": 0,
+ "truncated": 5,
+ "mean_completion_tokens": 350.2014787430684
+}

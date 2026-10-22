@@ -13,8 +13,8 @@ ON=${ON:-spark2}; DEAD_PART=${DEAD_PART:-0}; DEAD_IP=${DEAD_IP:?the ConnectX add
 PLAN=${PLAN:?plan json}; RUN=${RUN:?run dir}; CAL=${CALDIR:-/home/spark/dsv41_recipe/caldata}; CALF=${CALF:-cal.safetensors}
 IMAGE=${IMAGE:-dsv41-quant:dev}; REUSE=${REUSE:-}; OLD_PLAN=${OLD_PLAN:-}; P1_EXTRA=${P1_EXTRA:-}; DRY=${DRY:-0}
 MODEL=${OFFICIAL:-/home/spark/models/DeepSeek-V4.1-Flash-official-2cba9e42}   # OFFICIAL= the official checkpoint dir
-if [ -n "$REUSE" ]; then RMOUNT="-v $REUSE:/reuse:ro"; RARGS="--reuse /reuse --old-plan /plan/$(basename "$OLD_PLAN")"
-else RMOUNT=""; RARGS=""; fi
+. "$(dirname "$0")/reuse_args.sh"   # REUSE / OLD_PLAN: one path or comma lists, as for run_pass1_2box.sh
+reuse_args || exit 1
 sh_() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$1" "$2"; }
 [ "$DEAD_PART" = 0 ] || { echo "the watcher's SOLO mode reads part 0's log: DEAD_PART=1 needs it extended first"; exit 1; }
 if sh_ "$ON" "ping -c 2 -W 2 $DEAD_IP >/dev/null"; then

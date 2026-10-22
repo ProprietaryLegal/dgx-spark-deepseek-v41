@@ -1,0 +1,520 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0021 + 0023-0035 (touches the DSpark
+model, its Markov cache ops, spec_decode/dspark/speculator.py, spec_decode/depth_policy.py and the V2 model runner).
+VLLM_DSPARK_CONF_FEAT_HEAD=<feat_head.npz> (default unset; needs the local draft argmax and VLLM_DSPARK_MARKOV_FUSED=1):
+the speculator also computes, per draft position i, sigmoid(w[i,0] + w[i,1] z_i + w[i,2] m_i + w[i,3] logit(p1_i)) over
+the confidence head's logit z_i, the draft's (top-1 - top-2) logit margin m_i and its top-1 probability p1_i over the
+whole vocabulary (w [k, 4] from scripts/dspark/fit_draft_features.py --export on a fixed:k round log with patch 0034's
+features), and the depth policy's conf rule reads these under VLLM_DSPARK_DEPTH_POLICY=conf+feat (the head's own
+confidences stay in draft_token_confidence_probs and the round log). The fused Markov argmax (0031) keeps each shard's
+second-largest value and logsumexp next to its (max, index) pair in the same two launches
+(MarkovBiasCache.argmax_record), the all-gather carries four floats a row instead of two, and the features come from
+the gathered records inside the captured draft step; the (max, index) columns are argmax_pair's bit for bit, so the
+drafts do not move, and only the verify depth reads the confidences, so greedy text does not change either.
+VLLM_DSPARK_DEPTH_FILE is now also read at the first verify step after a request starts, so "conf:<ms,...>" and
+"conf+feat:<ms,...>" can alternate request by request in one serve (an A/B without boot-to-boot noise).
+Why: on our panel (11,357 fixed:5 rounds, 30 prompts a domain) the head + draft features replay +1.2% overall and +1.6% on set b's prose
+reply over the head alone; a 5,376-wide refit of the head itself gains +0.2-0.3% (Oct 21).
+Test: patches/tests/test_dspark_conf_feat_head.py (serve image).
+
+diff --git a/vllm/models/deepseek_v41/nvidia/dspark.py b/vllm/models/deepseek_v41/nvidia/dspark.py
+index 835a020..24d48fd 100644
+--- a/vllm/models/deepseek_v41/nvidia/dspark.py
++++ b/vllm/models/deepseek_v41/nvidia/dspark.py
+@@ -86,6 +86,16 @@ def draft_logit_features(logits: torch.Tensor, gather, tp: int) -> torch.Tensor:
+     return torch.stack([top[:, 0] - top[:, 1], torch.exp(top[:, 0] - lse)], dim=-1)
+ 
+ 
++def draft_features_from_records(rec: torch.Tensor) -> torch.Tensor:
++    """[..., tp, 4] gathered (max, index, second, logsumexp) records, one per rank's
++    vocabulary shard (MarkovBiasCache.argmax_record) -> [..., 2] fp32 (top-1 - top-2
++    logit margin, top-1 probability) over the whole vocabulary: draft_logit_features
++    from the records instead of the logits."""
++    top = torch.cat([rec[..., 0], rec[..., 2]], dim=-1).topk(2, dim=-1).values
++    lse = torch.logsumexp(rec[..., 3], dim=-1)
++    return torch.stack([top[..., 0] - top[..., 1], torch.exp(top[..., 0] - lse)], dim=-1)
++
++
+ # VLLM_DSPARK_MARKOV_FUSED=1: the local draft argmax's Markov bias, add and max in
+ # two launches (ops/markov_cache.py argmax_pair), the same drafts bit for bit.
+ _MARKOV_FUSED = os.environ.get("VLLM_DSPARK_MARKOV_FUSED", "0") == "1"
+@@ -555,6 +565,15 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
+     def supports_local_argmax(self) -> bool:
+         return self._markov_cache_local is not None
+ 
++    def draft_features(self, rec: torch.Tensor) -> torch.Tensor:
++        """[..., tp, 4] records from draft_argmax_local(rec_out=) -> [..., 2] (margin, p1)."""
++        return draft_features_from_records(rec)
++
++    def supports_feature_records(self) -> bool:
++        """draft_argmax_local can return each draft's (max, index, second, logsumexp)
++        records from the fused Markov argmax (VLLM_DSPARK_MARKOV_FUSED=1)."""
++        return _MARKOV_FUSED and self._markov_cache_local is not None
++
+     def compute_draft_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+         """This rank's vocabulary shard of the base draft logits (no gather): the columns
+         compute_draft_logits would gather from this rank, bit for bit."""
+@@ -568,6 +587,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
+         token_ids: torch.Tensor,
+         markov_embed: torch.Tensor,
+         feat_out: torch.Tensor | None = None,
++        rec_out: torch.Tensor | None = None,
+     ) -> torch.Tensor:
+         """Greedy draft ids from this rank's shard of base logits + Markov bias: local
+         (max, argmax), then an all-gather of one (value, index) pair per row per rank,
+@@ -591,6 +611,20 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
+                     self.lm_head.tp_size,
+                 )
+             )
++        elif rec_out is not None and base_local.stride(-1) == 1:
++            # VLLM_DSPARK_CONF_FEAT_HEAD: the fused pair plus the shard's second-largest
++            # value and logsumexp, gathered whole into rec_out [rows, tp, 4]
++            pair = self._markov_cache_local.argmax_record(
++                token_ids, markov_embed, base_local, hi - lo, lo
++            )
++        elif rec_out is not None:
++            bias = self._markov_cache_local(token_ids, markov_embed)
++            lf = (base_local[:, : hi - lo] + bias).float()
++            vals, idx = lf.max(dim=-1)
++            pair = torch.stack(
++                [vals, (idx + lo).float(), lf.topk(2, dim=-1).values[:, 1],
++                 torch.logsumexp(lf, dim=-1)], dim=-1,
++            )
+         elif _MARKOV_FUSED and base_local.stride(-1) == 1:
+             # bias + add + the shard's max in two launches, bit for bit the same pair
+             pair = self._markov_cache_local.argmax_pair(
+@@ -602,7 +636,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
+             vals, idx = logits.max(dim=-1)
+             pair = torch.stack([vals.float(), (idx + lo).float()], dim=-1)
+         tp = self.lm_head.tp_size
+-        gathered = tensor_model_parallel_all_gather(pair, dim=-1).view(-1, tp, 2)
++        gathered = tensor_model_parallel_all_gather(pair, dim=-1).view(
++            -1, tp, pair.shape[-1]
++        )
++        if rec_out is not None:
++            rec_out.copy_(gathered)
+         best = gathered[:, :, 0].argmax(dim=-1, keepdim=True)
+         return gathered[:, :, 1].gather(dim=-1, index=best).squeeze(-1).to(torch.int64)
+ 
+diff --git a/vllm/models/deepseek_v41/nvidia/ops/markov_cache.py b/vllm/models/deepseek_v41/nvidia/ops/markov_cache.py
+index b079c72..b5ce877 100644
+--- a/vllm/models/deepseek_v41/nvidia/ops/markov_cache.py
++++ b/vllm/models/deepseek_v41/nvidia/ops/markov_cache.py
+@@ -22,6 +22,11 @@ global index) pair the all-gather sends, instead of the bias kernel, the add,
+ torch.max and the pair's stacking. Same arithmetic and rounding points, ties to
+ the lowest index as torch.max: the drafts are the unfused path's bit for bit.
+ 
++``MarkovBiasCache.argmax_record`` (VLLM_DSPARK_CONF_FEAT_HEAD): the same two launches
++also keep each row's second-largest value (a tie at the max counts twice, as
++torch.topk) and its logsumexp over the shard, a [rows, 4] (max, global index,
++second, logsumexp) record whose first two columns are argmax_pair's bit for bit.
++
+ ``w2`` may be a contiguous row range of markov_w2 (one TP rank's vocabulary
+ shard, for the local draft argmax): rows are then that range's bias, still keyed
+ by the previous token over the whole vocabulary (``w1``'s rows).
+@@ -93,6 +98,8 @@ def _markov_argmax_partial_kernel(
+     base_ptr,
+     pval_ptr,
+     pidx_ptr,
++    psec_ptr,
++    psum_ptr,
+     V,
+     cache_stride,
+     w2_stride,
+@@ -102,6 +109,7 @@ def _markov_argmax_partial_kernel(
+     R: tl.constexpr,
+     BLOCK_V: tl.constexpr,
+     SUB_V: tl.constexpr,
++    FEAT: tl.constexpr,
+ ):
+     b = tl.program_id(0)
+     blk = tl.program_id(1)
+@@ -109,6 +117,8 @@ def _markov_argmax_partial_kernel(
+     slot = tl.load(slot_ptr + tok)
+     best_v = float("-inf")
+     best_i = V
++    sec_v = float("-inf")  # FEAT: the block's second largest
++    run_s = 0.0  # FEAT: sum of exp(x - best_v) over the block so far
+     r = tl.arange(0, R)
+     for s in tl.static_range(0, BLOCK_V, SUB_V):
+         cols = blk * BLOCK_V + s + tl.arange(0, SUB_V)
+@@ -134,15 +144,31 @@ def _markov_argmax_partial_kernel(
+         x = tl.where(mask, x.to(tl.float32), float("-inf"))
+         m = tl.max(x, axis=0)
+         i = tl.min(tl.where(x == m, cols, V), axis=0)
++        if FEAT:
++            n_m = tl.sum((x == m).to(tl.int32), axis=0)
++            m2 = tl.where(n_m > 1, m, tl.max(tl.where(x == m, float("-inf"), x), axis=0))
++            # the top two of (best_v, sec_v) and (m, m2)
++            sec_v = tl.maximum(tl.minimum(best_v, m), tl.maximum(sec_v, m2))
++            new_v = tl.maximum(best_v, m)
++            sub_s = tl.sum(tl.where(x > float("-inf"), tl.exp(x - new_v), 0.0), axis=0)
++            run_s = tl.where(
++                new_v > float("-inf"), run_s * tl.exp(best_v - new_v) + sub_s, 0.0
++            )
+         take = m > best_v  # strictly: an earlier sub-block keeps a tie
+         best_i = tl.where(take, i, best_i)
+         best_v = tl.where(take, m, best_v)
+     tl.store(pval_ptr + b * nblk + blk, best_v)
+     tl.store(pidx_ptr + b * nblk + blk, best_i)
++    if FEAT:
++        tl.store(psec_ptr + b * nblk + blk, sec_v)
++        tl.store(psum_ptr + b * nblk + blk, run_s)
+ 
+ 
+ @triton.jit
+-def _markov_argmax_final_kernel(pval_ptr, pidx_ptr, pair_ptr, nblk, lo, NB: tl.constexpr):
++def _markov_argmax_final_kernel(
++    pval_ptr, pidx_ptr, psec_ptr, psum_ptr, pair_ptr, nblk, lo,
++    NB: tl.constexpr, W: tl.constexpr, FEAT: tl.constexpr,
++):
+     b = tl.program_id(0)
+     j = tl.arange(0, NB)
+     mask = j < nblk
+@@ -150,8 +176,16 @@ def _markov_argmax_final_kernel(pval_ptr, pidx_ptr, pair_ptr, nblk, lo, NB: tl.c
+     i = tl.load(pidx_ptr + b * nblk + j, mask=mask, other=2147483647)
+     m = tl.max(v, axis=0)
+     k = tl.min(tl.where(v == m, i, 2147483647), axis=0)
+-    tl.store(pair_ptr + b * 2, m)
+-    tl.store(pair_ptr + b * 2 + 1, (k + lo).to(tl.float32))
++    tl.store(pair_ptr + b * W, m)
++    tl.store(pair_ptr + b * W + 1, (k + lo).to(tl.float32))
++    if FEAT:
++        n_m = tl.sum((v == m).to(tl.int32), axis=0)
++        sec = tl.where(n_m > 1, m, tl.max(tl.where(v == m, float("-inf"), v), axis=0))
++        sec = tl.maximum(sec, tl.max(tl.load(psec_ptr + b * nblk + j, mask=mask, other=float("-inf")), axis=0))
++        ps = tl.load(psum_ptr + b * nblk + j, mask=mask, other=0.0)
++        tot = tl.sum(tl.where(v > float("-inf"), ps * tl.exp(v - m), 0.0), axis=0)
++        tl.store(pair_ptr + b * W + 2, sec)
++        tl.store(pair_ptr + b * W + 3, m + tl.log(tot))
+ 
+ 
+ def markov_argmax_pair(
+@@ -163,17 +197,22 @@ def markov_argmax_pair(
+     base_local: torch.Tensor,
+     vocab: int,
+     lo: int,
++    record: bool = False,
+ ) -> torch.Tensor:
+     """[rows, 2] fp32: (max, lo + first argmax) of base_local[:, :vocab] + bias per
+-    row, the bias as markov_bias_rows gives it."""
++    row, the bias as markov_bias_rows gives it; with `record`, [rows, 4]: the same
++    two columns, then the row's second-largest value and its logsumexp."""
+     num_rows, rank = markov_embed.shape
+     assert w2.stride(1) == 1 and markov_embed.stride(1) == 1
+     assert base_local.stride(1) == 1
+     nblk = triton.cdiv(vocab, _ARGMAX_BLOCK_V)
+     dev = base_local.device
++    width = 4 if record else 2
+     pval = torch.empty((num_rows, nblk), dtype=torch.float32, device=dev)
+     pidx = torch.empty((num_rows, nblk), dtype=torch.int32, device=dev)
+-    pair = torch.empty((num_rows, 2), dtype=torch.float32, device=dev)
++    psec = torch.empty((num_rows, nblk) if record else (1,), dtype=torch.float32, device=dev)
++    psum = torch.empty((num_rows, nblk) if record else (1,), dtype=torch.float32, device=dev)
++    pair = torch.empty((num_rows, width), dtype=torch.float32, device=dev)
+     if num_rows == 0:
+         return pair
+     _markov_argmax_partial_kernel[(num_rows, nblk)](
+@@ -185,6 +224,8 @@ def markov_argmax_pair(
+         base_local,
+         pval,
+         pidx,
++        psec,
++        psum,
+         vocab,
+         cache.stride(0),
+         w2.stride(0),
+@@ -194,10 +235,12 @@ def markov_argmax_pair(
+         R=rank,
+         BLOCK_V=_ARGMAX_BLOCK_V,
+         SUB_V=_BLOCK_V,
++        FEAT=record,
+         num_warps=4,
+     )
+     _markov_argmax_final_kernel[(num_rows,)](
+-        pval, pidx, pair, nblk, lo, NB=triton.next_power_of_2(nblk), num_warps=1
++        pval, pidx, psec, psum, pair, nblk, lo,
++        NB=triton.next_power_of_2(nblk), W=width, FEAT=record, num_warps=1,
+     )
+     return pair
+ 
+@@ -298,6 +341,28 @@ class MarkovBiasCache:
+             lo,
+         )
+ 
++    def argmax_record(
++        self,
++        token_ids: torch.Tensor,
++        markov_embed: torch.Tensor,
++        base_local: torch.Tensor,
++        vocab: int,
++        lo: int,
++    ) -> torch.Tensor:
++        """argmax_pair's two columns, then the second-largest value and the logsumexp
++        of base_local[:, :vocab] + this cache's bias, per row: [rows, 4] fp32."""
++        return markov_argmax_pair(
++            token_ids,
++            self.slot_of_token,
++            self.cache,
++            markov_embed.contiguous(),
++            self.w2,
++            base_local,
++            vocab,
++            lo,
++            record=True,
++        )
++
+     def __call__(self, token_ids: torch.Tensor, markov_embed: torch.Tensor):
+         out = torch.empty(
+             (markov_embed.shape[0], self.w2.shape[0]),
+diff --git a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runner.py
+index 23d7622..01442e3 100644
+--- a/vllm/v1/worker/gpu/model_runner.py
++++ b/vllm/v1/worker/gpu/model_runner.py
+@@ -2370,6 +2370,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+                     hidden=getattr(self.speculator, "conf_inputs", None)
+                     if getattr(self.speculator, "_log_hidden", False)
+                     else None,
++                    fitted=getattr(self.speculator, "draft_fitted_conf", None),
+                 )
+ 
+         if self.num_speculative_steps > 0:
+diff --git a/vllm/v1/worker/gpu/spec_decode/depth_policy.py b/vllm/v1/worker/gpu/spec_decode/depth_policy.py
+index 99cc0ef..7ce1613 100644
+--- a/vllm/v1/worker/gpu/spec_decode/depth_policy.py
++++ b/vllm/v1/worker/gpu/spec_decode/depth_policy.py
+@@ -20,14 +20,18 @@ and dense rows are independent), so the depth decides how many drafts can be
+ accepted and never which tokens come out.
+ 
+ Environment:
+-  VLLM_DSPARK_DEPTH_POLICY  "conf" (the rule above), "fixed:<d>" (every request
+-                            verifies d drafts) or unset / "0" (off)
++  VLLM_DSPARK_DEPTH_POLICY  "conf" (the rule above), "conf+feat" (the rule on the
++                            confidences fitted with the drafts' features, patch
++                            0036's VLLM_DSPARK_CONF_FEAT_HEAD), "fixed:<d>" (every
++                            request verifies d drafts) or unset / "0" (off)
+   VLLM_DSPARK_ROUND_MS      verify forward ms for 1..k+1 live rows, comma separated
+   VLLM_DSPARK_DRAFT_MS      the drafter pass in ms
+   VLLM_DSPARK_DEPTH_FILE    a file holding a policy string, re-read every 64
+-                            verify steps (to sweep depths in one serve);
+-                            "conf:<ms,...>" also replaces the cost table (round
+-                            ms by depth 0..k, drafter included)
++                            verify steps and at the first verify step after a
++                            request starts (to sweep depths or A/B policies in
++                            one serve); "conf:<ms,...>" / "conf+feat:<ms,...>"
++                            also replaces the cost table (round ms by depth 0..k,
++                            drafter included)
+   VLLM_DSPARK_DEPTH_LOG     N > 0: every N verify steps, log the chosen depths and
+                             the drafts verified / accepted
+   VLLM_DSPARK_CONF_TEMPS    "t1,...,tk": per-position temperatures for the
+@@ -72,7 +76,7 @@ def _parse_policy(text: str | None) -> tuple[str, int]:
+     p = (text or "").strip().lower()
+     if p in ("", "0", "off", "none"):
+         return "off", 0
+-    if p == "conf" or p.startswith("conf:"):
++    if p in ("conf", "conf+feat") or p.startswith(("conf:", "conf+feat:")):
+         return "conf", 0
+     if p.startswith("fixed:"):
+         return "fixed", max(0, int(p.split(":", 1)[1]))
+@@ -84,11 +88,16 @@ def _parse_policy(text: str | None) -> tuple[str, int]:
+ def _parse_table(text: str | None) -> list[float] | None:
+     """The round-cost table of a "conf:<ms,ms,...>" policy string (depth 0 first)."""
+     p = (text or "").strip().lower()
+-    if not p.startswith("conf:"):
++    if not p.startswith(("conf:", "conf+feat:")):
+         return None
+     return [float(x) for x in p.split(":", 1)[1].split(",") if x.strip()]
+ 
+ 
++def _wants_feat(text: str | None) -> bool:
++    """A "conf+feat" policy string: the conf rule reads the feature-fitted confidences."""
++    return (text or "").strip().lower().startswith("conf+feat")
++
++
+ def depth_policy_requested() -> bool:
+     return _parse_policy(os.environ.get("VLLM_DSPARK_DEPTH_POLICY"))[0] != "off"
+ 
+@@ -157,6 +166,11 @@ class DSparkDepthPolicy:
+         self.mode, self.fixed = _parse_policy(
+             os.environ.get("VLLM_DSPARK_DEPTH_POLICY")
+         )
++        self.feat = _wants_feat(os.environ.get("VLLM_DSPARK_DEPTH_POLICY"))
++        self._feat_missing_warned = False
++        # a request started since the last read of VLLM_DSPARK_DEPTH_FILE: every rank
++        # adds the same requests, so every rank reads (and broadcasts) at the same step
++        self._reload_pending = False
+         if self.mode == "conf" and not has_confidence:
+             raise ValueError(
+                 "VLLM_DSPARK_DEPTH_POLICY=conf needs the draft model's confidence "
+@@ -224,7 +238,9 @@ class DSparkDepthPolicy:
+             self._log_header()
+ 
+     def describe(self) -> str:
+-        return f"fixed:{self.fixed}" if self.mode == "fixed" else self.mode
++        if self.mode == "fixed":
++            return f"fixed:{self.fixed}"
++        return "conf+feat" if self.mode == "conf" and self.feat else self.mode
+ 
+     def _log_header(self) -> None:
+         if self._conf_log is not None:
+@@ -239,13 +255,16 @@ class DSparkDepthPolicy:
+ 
+     def reset(self, req_index: int) -> None:
+         self.depth[req_index] = self.k
++        if self.file is not None:
++            self._reload_pending = True
+ 
+     def _maybe_reload(self) -> None:
+         """Measurement knob: take the policy in VLLM_DSPARK_DEPTH_FILE. Rank 0 reads
+         the file and broadcasts it, so every rank switches at the same step (ranks
+         that chose different depths would accept different tokens)."""
+-        if self.file is None or self.num_records % _FILE_EVERY:
++        if self.file is None or (self.num_records % _FILE_EVERY and not self._reload_pending):
+             return
++        self._reload_pending = False
+         from vllm.distributed.parallel_state import get_tp_group
+ 
+         try:
+@@ -281,8 +300,9 @@ class DSparkDepthPolicy:
+                 self.cost_ms.copy_(new)
+                 changed = True
+                 logger.info("DSpark depth cost table -> %s", [round(c, 2) for c in table[: self.k + 1]])
+-        if (mode, fixed) != (self.mode, self.fixed):
+-            self.mode, self.fixed = mode, fixed
++        feat = _wants_feat(text)
++        if (mode, fixed, feat) != (self.mode, self.fixed, self.feat):
++            self.mode, self.fixed, self.feat = mode, fixed, feat
+             changed = True
+             logger.info("DSpark depth policy -> %s", self.describe())
+         if changed:
+@@ -295,9 +315,11 @@ class DSparkDepthPolicy:
+         num_reqs: int,
+         feats: torch.Tensor | None = None,
+         hidden: torch.Tensor | None = None,
++        fitted: torch.Tensor | None = None,
+     ) -> None:
+         """Choose each request's depth for the drafts just proposed. `feats`
+-        ([reqs, k, 2], VLLM_DSPARK_CONF_LOG_FEATURES) is only logged."""
++        ([reqs, k, 2], VLLM_DSPARK_CONF_LOG_FEATURES) is only logged; `fitted`
++        ([reqs, k], patch 0036) replaces the confidences under "conf+feat"."""
+         if num_reqs == 0:
+             return
+         self._maybe_reload()
+@@ -335,6 +357,15 @@ class DSparkDepthPolicy:
+             )
+         else:
+             conf = confidence_probs[:num_reqs]
++            if self.feat:
++                if fitted is not None:
++                    conf = fitted[:num_reqs]
++                elif not self._feat_missing_warned:
++                    self._feat_missing_warned = True
++                    logger.warning(
++                        "DSpark depth policy conf+feat without fitted confidences "
++                        "(VLLM_DSPARK_CONF_FEAT_HEAD unset): the raw ones are used"
++                    )
+             if self.inv_temp is not None:
+                 conf = calibrate(conf, self.inv_temp, self.bias)
+             depth = choose_depth(conf, self.cost_ms)
+diff --git a/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py b/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py
+index 18cf46e..fcd332a 100644
+--- a/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py
++++ b/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py
+@@ -60,6 +60,19 @@ def conf_head_override(
+     return torch.sigmoid(z).flatten()
+ 
+ 
++def conf_feat_head(
++    confidence: torch.Tensor, feats: torch.Tensor, w: torch.Tensor
++) -> torch.Tensor:
++    """VLLM_DSPARK_CONF_FEAT_HEAD: per draft position i, sigmoid(w[i, 0] + w[i, 1] z_i
++    + w[i, 2] m_i + w[i, 3] logit(p1_i)) over the head's logit z_i = logit(c_i), the
++    draft's (top-1 - top-2) logit margin m_i and its top-1 probability p1_i, logits
++    clamped at 1e-6 as scripts/dspark/fit_draft_features.py fits them. confidence
++    [reqs, k], feats [reqs, k, 2], w [k, 4] -> [reqs, k]."""
++    z = torch.logit(confidence.float(), eps=1e-6)
++    lp = torch.logit(feats[..., 1], eps=1e-6)
++    return torch.sigmoid(w[:, 0] + w[:, 1] * z + w[:, 2] * feats[..., 0] + w[:, 3] * lp)
++
++
+ class DSparkSpeculator(DFlashSpeculator):
+     _speculator_name = "DSpark"
+ 
+@@ -126,6 +139,15 @@ class DSparkSpeculator(DFlashSpeculator):
+         # acceptance (fitted offline from patch 0034's round logs), per draft position, over the
+         # same inputs as the checkpoint's head; loaded in load_draft_model.
+         self._conf_head: dict[str, torch.Tensor] | None = None
++        # VLLM_DSPARK_CONF_FEAT_HEAD=<.npz>: w [k, 4] per draft position over the head's
++        # logit, the draft's logit margin and its top-1 probability
++        # (scripts/dspark/fit_draft_features.py --export); the fused Markov argmax returns
++        # each draft's gathered records into _feat_rec. Loaded in load_draft_model.
++        self._feat_head: torch.Tensor | None = None
++        self._feat_rec: torch.Tensor | None = None
++        # their output: the confidences the depth policy reads under "conf+feat"
++        # (draft_token_confidence_probs stays the head's own)
++        self.draft_fitted_conf: torch.Tensor | None = None
+ 
+     def load_draft_model(
+         self,
+@@ -195,6 +217,34 @@ class DSparkSpeculator(DFlashSpeculator):
+                 "DSpark confidence head from %s (%s)", path,
+                 "linear + MLP" if "w1" in head else "linear",
+             )
++        fpath = os.environ.get("VLLM_DSPARK_CONF_FEAT_HEAD")
++        if fpath:
++            if not (
++                self._local_argmax
++                and self.use_confidence_head
++                and getattr(model, "supports_feature_records", lambda: False)()
++            ):
++                raise ValueError(
++                    f"VLLM_DSPARK_CONF_FEAT_HEAD={fpath}: needs the local draft argmax, "
++                    "VLLM_DSPARK_MARKOV_FUSED=1 and the confidence head"
++                )
++            import numpy as np
++
++            w = np.load(fpath)["w"]
++            k = self.num_speculative_steps
++            if w.ndim != 2 or w.shape[0] < k or w.shape[1] != 4:
++                raise ValueError(
++                    f"VLLM_DSPARK_CONF_FEAT_HEAD={fpath}: needs w [>= {k}, 4], got {w.shape}"
++                )
++            self._feat_head = torch.tensor(w[:k], dtype=torch.float32, device=self.device)
++            self._feat_rec = torch.zeros(
++                self.max_num_reqs, k, model.lm_head.tp_size, 4,
++                dtype=torch.float32, device=self.device,
++            )
++            self.draft_fitted_conf = torch.zeros(
++                self.max_num_reqs, k, dtype=torch.float32, device=self.device
++            )
++            logger.info("DSpark confidence from the head + draft features in %s", fpath)
+         if self._log_hidden:
+             width = self.draft_model_config.get_hidden_size() + int(
+                 getattr(self.draft_model_config.hf_config, "dspark_markov_rank", 0) or 0
+@@ -283,7 +333,12 @@ class DSparkSpeculator(DFlashSpeculator):
+                     base_logits[:, i],
+                     prev,
+                     markov_embed,
+-                    feat_out=self.draft_feats[:num_reqs, i] if self._log_feats else None,
++                    feat_out=self.draft_feats[:num_reqs, i]
++                    if self._log_feats and self._feat_rec is None
++                    else None,
++                    rec_out=self._feat_rec[:num_reqs, i]
++                    if self._feat_rec is not None
++                    else None,
+                 )
+                 self.draft_tokens[:num_reqs, i] = draft_sampled_i
+                 prev = draft_sampled_i
+@@ -310,6 +365,13 @@ class DSparkSpeculator(DFlashSpeculator):
+             self.draft_token_confidence_probs[:num_reqs] = confidence.view(
+                 num_reqs, n_spec
+             )
++            if self._feat_head is not None:
++                feats = self.model.draft_features(self._feat_rec[:num_reqs])
++                self.draft_fitted_conf[:num_reqs] = conf_feat_head(
++                    confidence.view(num_reqs, n_spec), feats, self._feat_head
++                )
++                if self._log_feats:
++                    self.draft_feats[:num_reqs] = feats
+             if self._log_hidden and self.conf_inputs is not None:
+                 dt = self.conf_inputs.dtype
+                 self.conf_inputs[:num_reqs] = torch.cat(

@@ -28,8 +28,8 @@ def _pin_cpus() -> None:
     """EXL3_CPU_PIN="5-9,15-19": pin every thread of this process, and the ones it starts later, to those CPUs (on
     GB10 the Cortex-X925 cores: 5-9 and 15-19 at 3.9 GHz; 0-4 and 10-14 are Cortex-A725 at 2.8 GHz). Unpinned, the
     scheduler can run a TP worker's launch thread on an A725 core for a whole request: set b showed two round-time
-    modes ~5% apart with the same text and depth choices, and spark2's worker thread was found on CPU 13 (LOG Oct 11
-    19:39-19:45). Default off."""
+    modes ~5% apart with the same text and depth choices, and spark2's worker thread was found on CPU 13 (Oct 11).
+    Default off."""
     import os
 
     spec = os.environ.get("EXL3_CPU_PIN", "").strip()
@@ -77,6 +77,8 @@ def register() -> None:
     install_rdma()
     from .router import install as install_router  # EXL3_ROUTER=1: decode-size MoE gate GEMMs on exl3_router
     install_router()
+    from .hc_bf16 import install as install_hc     # VLLM_DSV41_HC_BF16=1: the mHC mixing GEMM on bf16 weight copies
+    install_hc()
     _registered = True
 
 

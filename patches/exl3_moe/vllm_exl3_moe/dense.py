@@ -11,6 +11,8 @@ relative error vs the FP8 weights, measured by scripts/quantize/p4_dense.py) cut
     layers.L.attn.wo_b.{...}                                     row-parallel      (in 8192, out 5120)
     layers.L.ffn.shared_experts.w1 / w3.{...}  (-> gate_up_proj shards 0 / 1, each with its own suh)   column-parallel
     layers.L.ffn.shared_experts.w2.{...}       (-> down_proj)                                           row-parallel
+    layers.L.engram.wkv.{...}  L = 1, 14  column-parallel (in 6144, out 25600); row-parallel with patch 0028's
+                               VLLM_ENGRAM_WKV_ROWPAR=1 (each rank's input rows are its own 12 hash heads)
 TP cuts are exact because EXL3's input / output transforms are 128-wide block Hadamards with per-channel signs: a column
 cut at a multiple of 128 keeps whole output blocks (svh cut, suh whole), a row cut keeps whole input blocks (suh cut,
 svh whole) and each rank's output transform is linear, so the partial sums still add up to the full product.
@@ -33,7 +35,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearMethodBase, ReplicatedLinear, RowParallelLinear
 from vllm.model_executor.utils import set_weight_attrs
 
-from . import l2pf
+from . import l2pf, woa_qdq
 from .hostcopy import copy_from_host
 
 logger = init_logger(__name__)
@@ -83,6 +85,49 @@ def dense_module(prefix: str) -> tuple[int, str] | None:
     return (int(m.group(1)), m.group(2)) if m else None
 
 
+def context_kv_group(modules, part: int = 1):
+    """One exl3_mrow launch over part `part` of several fused modules on one shared input: DSpark's context KV, the
+    wkv part (1) of each draft layer's fused wq_a + wkv on the same projected target hidden. vLLM runs each layer's
+    whole fused projection and drops the wq_a columns (5.7 MB read a layer for 1.6 MB used, a launch each). Returns
+    (run, widths), run(x [rows <= MROW_MAX_ROWS, in] bf16) -> [rows, sum(widths)] bf16 with module i's part in its
+    columns, or None when a module has no flat EXL3 parts, the K differ, a shape does not fit or mrow is off. Cached on
+    the first module."""
+    if not modules:
+        return None
+    cached = getattr(modules[0], "_exl3_ctx_group", None)
+    if cached is not None and cached[0] == part:
+        return cached[1]
+    plist, widths, ks = [], [], set()
+    for m in modules:
+        parts = getattr(m, "_exl3_flat_parts", None)
+        if not parts or len(parts) <= part:
+            return None
+        t, su, sv, o = parts[part]
+        plist.append((t, su, sv, 0, sum(widths)))
+        widths.append(o)
+        ks.add(getattr(m, "_exl3_k", None))
+    if len(ks) != 1 or None in ks or _mrow_mode() == "0":
+        return None
+    k = ks.pop()
+    if not 2 <= k <= 6 or any(t.shape[0] % 8 or t.shape[1] % 8 for t, _, _, _, _ in plist):
+        return None
+    from .mrow import MrowGroup
+    g = MrowGroup([(t.contiguous(), su.contiguous(), sv.contiguous(), xc, oc) for t, su, sv, xc, oc in plist], k)
+    total = sum(widths)
+
+    def run(x: torch.Tensor) -> torch.Tensor:
+        x2 = x.reshape(-1, x.shape[-1]).contiguous()
+        if x2.data_ptr() % 16:
+            x2 = x2.clone()
+        return g(x2, torch.empty((x2.shape[0], total), dtype=torch.bfloat16, device=x.device))
+
+    out = (run, widths)
+    modules[0]._exl3_ctx_group = (part, out)
+    logger.info("EXL3 dense: part %d of %d fused modules as one exl3_mrow launch (%s columns)", part, len(modules),
+                "+".join(str(w) for w in widths))
+    return out
+
+
 @dataclass(frozen=True)
 class Cut:
     """What one rank keeps of a full EXL3 matrix [in, out]: rows (input) or columns (output), in channels."""
@@ -120,11 +165,12 @@ def _holder(in_f: int, out_f: int, k: int, n: int = 1) -> dict[str, torch.Tensor
 class Exl3DenseLinearMethod(LinearMethodBase):
     """One method instance per vLLM linear module."""
 
-    def __init__(self, module: str, k: int, layer_idx: int = -1, prefetch: bool = True):
+    def __init__(self, module: str, k: int, layer_idx: int = -1, prefetch: bool | str = True):
         self.module = module
         self.k = int(k)
         self.layer_idx = layer_idx
-        self.prefetch = prefetch          # backbone modules join l2pf's per-layer chain; the drafter's do not
+        self.prefetch = prefetch          # backbone modules join l2pf's per-layer chain; the drafter's do not, or with
+        self.drafter = prefetch == "drafter"  # "drafter" (EXL3_L2PF_DRAFTER) join the draft layers' own chain
 
     # ----------------------------------------------------------------------------------------------- weights
     def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int, output_partition_sizes: list[int],
@@ -180,7 +226,7 @@ class Exl3DenseLinearMethod(LinearMethodBase):
         if self.module == "engram.wkv":
             # An Engram variant keeps V4.1's shards 47 / 48 as hardlinks (they hold the 101.5 GB embedding tables next
             # to the FP8 wkv), so the FP8 wkv tensors still stream in, and V4.1's load_weights wants a parameter for
-            # each (.scale maps to weight_scale or weight_scale_inv): empty sinks that drop them (LOG Oct 11 12:40)
+            # each (.scale maps to weight_scale or weight_scale_inv): empty sinks that drop them
             for name in ("weight", "weight_scale", "weight_scale_inv"):
                 p = Parameter(torch.empty(0, dtype=torch.uint8), requires_grad=False)
                 layer.register_parameter(name, p)
@@ -277,8 +323,14 @@ class Exl3DenseLinearMethod(LinearMethodBase):
                     for g in layer.exl3_groups]
             layer._exl3 = lins
 
+            # VLLM_DSV41_WOA_QDQ=1: o gets DeepSeek's FP8 round trip first (woa_qdq.py), folded into mrow's input load at
+            # decode sizes and fused with the fp16 cast above them
+            qdq = woa_qdq.enabled()
             mrow = self._mrow_group([(layer.slice[g].trellis, layer.slice[g].suh, layer.slice[g].svh, i * in_f, i * out_f)
-                                     for i, g in enumerate(layer.exl3_groups)])
+                                     for i, g in enumerate(layer.exl3_groups)], qdq=qdq)
+            if qdq:
+                logger.info_once("VLLM_DSV41_WOA_QDQ: EXL3 wo_a rounds o to FP8 (32 values a ue8m0 scale), as DeepSeek's "
+                                 "reference does")
 
             grouped_in_place = _mrow_grouped()
 
@@ -293,12 +345,12 @@ class Exl3DenseLinearMethod(LinearMethodBase):
                     if x2.stride(1) != 1 or x2.data_ptr() % 16:  # the kernel reads 4-element vectors, row-major
                         x2 = x2.contiguous().clone()
                     return mrow(x2, y).view(t, g_loc, out_f)
-                xs = o_rot.to(torch.float16)
+                xs = woa_qdq.qdq(o_rot, torch.float16) if qdq else o_rot.to(torch.float16)
                 return torch.stack([g_lin.forward(xs[:, i].contiguous(), {}, out_dtype=torch.float32)
                                     for i, g_lin in enumerate(lins)], 1).to(o_rot.dtype)
             layer.grouped_bmm = grouped_bmm
             if self.prefetch:
-                l2pf.register(self.layer_idx, self.module, mrow.trellis if mrow is not None else [])
+                l2pf.register(self.layer_idx, self.module, mrow.trellis if mrow is not None else [], self.drafter)
             return
         if getattr(layer, "exl3_flat", None):
             in_f = layer.exl3_shape[0]
@@ -307,10 +359,13 @@ class Exl3DenseLinearMethod(LinearMethodBase):
                      for i, (o, t_off, s_off) in enumerate(layer.exl3_flat)]
             layer._exl3 = [lin(t, su, sv, layer.mul1[i], in_f, o)
                            for i, ((t, su, sv), (o, _, _)) in enumerate(zip(parts, layer.exl3_flat))]
+            # each part's tensors and width, for a launch over one part of several modules (context_kv_group)
+            layer._exl3_k = self.k
+            layer._exl3_flat_parts = [(t, su, sv, o) for (t, su, sv), (o, _, _) in zip(parts, layer.exl3_flat)]
             col = [sum(o for o, _, _ in layer.exl3_flat[:i]) for i in range(len(parts))]
             layer._mrow = self._mrow_group([(t, su, sv, 0, c) for (t, su, sv), c in zip(parts, col)])
             if self.prefetch:
-                l2pf.register(self.layer_idx, self.module, layer._mrow.trellis if layer._mrow is not None else [])
+                l2pf.register(self.layer_idx, self.module, layer._mrow.trellis if layer._mrow is not None else [], self.drafter)
             return
         in_f, out_f = layer.exl3_shape
         if layer.exl3_n == 1:
@@ -322,17 +377,19 @@ class Exl3DenseLinearMethod(LinearMethodBase):
             layer._mrow = self._mrow_group([(layer.trellis[i], layer.suh[i], layer.svh[i], 0, i * out_f)
                                             for i in range(layer.exl3_n)])
         if self.prefetch:
-            l2pf.register(self.layer_idx, self.module, layer._mrow.trellis if layer._mrow is not None else [])
+            l2pf.register(self.layer_idx, self.module, layer._mrow.trellis if layer._mrow is not None else [], self.drafter)
 
-    def _mrow_group(self, parts):
-        """One exl3_mrow launch for the module's matrices on one input, or None (disabled, unsupported K or shape)."""
+    def _mrow_group(self, parts, qdq: bool = False):
+        """One exl3_mrow launch for the module's matrices on one input, or None (disabled, unsupported K or shape).
+        `qdq`: the build that gives the input DeepSeek's FP8 round trip as it loads it (wo_a's, mrow.py)."""
         mode = _mrow_mode()
         if mode == "0" or (mode == "groups" and len(parts) < 2) or not 2 <= self.k <= 6:
             return None
         if any(t.shape[0] % 8 or t.shape[1] % 8 for t, _, _, _, _ in parts):   # k and n must be multiples of 128
             return None
         from .mrow import MrowGroup
-        g = MrowGroup([(t.contiguous(), su.contiguous(), sv.contiguous(), xc, oc) for t, su, sv, xc, oc in parts], self.k)
+        g = MrowGroup([(t.contiguous(), su.contiguous(), sv.contiguous(), xc, oc) for t, su, sv, xc, oc in parts], self.k,
+                      qdq=qdq)
         logger.debug_once("EXL3 dense: %s runs as one exl3_mrow launch at <= %d rows", self.module, MROW_MAX_ROWS)
         return g
 

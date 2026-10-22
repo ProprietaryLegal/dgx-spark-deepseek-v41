@@ -62,6 +62,13 @@ def main():
     ap.add_argument("--floor-layers", default="",
                     help="minimum K for every expert of some layers, e.g. 37,38,39:3 (the DSpark drafter reads the hidden "
                          "states of layers 37-39: final-output KL cannot see what K2 there costs in draft acceptance)")
+    ap.add_argument("--usage-stats", default="",
+                    help="per-domain pass-0 stats (layer_XX.json with a 'domains' dict, e.g. data/p0_stats_1017/dom): the "
+                         "decode cap's usage comes from these domains' routing, weighted by --usage-weights, instead of the "
+                         "main stats' counts (the importance stays the main stats')")
+    ap.add_argument("--usage-weights", default="",
+                    help="domain:weight list for --usage-stats, e.g. writing:1,chat:1,code:1,std:1 (per-token usage of "
+                         "each domain, mixed by these weights)")
     ap.add_argument("-o", "--out", required=True)
     a = ap.parse_args()
     global EPS_TABLE
@@ -81,6 +88,19 @@ def main():
     if a.floor_layers:
         ls_, kf = a.floor_layers.split(":")
         layer_floor = {int(l): float(kf) for l in ls_.split(",")}
+    usage_of = None
+    if a.usage_stats:                                  # the decode cap on another routing mix (see --usage-stats)
+        wts = {d: float(w) for d, w in (x.split(":") for x in a.usage_weights.split(","))}
+        usage_of = {}
+        for l in layers:
+            us = json.load(open(os.path.join(a.usage_stats, f"layer_{l:02d}.json")))["domains"]
+            mix = [0.0] * len(st[l]["count"])
+            for d, w in wts.items():
+                tok_d = max(us[d]["tokens"], 1)
+                for e, c in enumerate(us[d]["count"]):
+                    mix[e] += w * c / tok_d
+            tot_w = sum(wts.values())
+            usage_of[l] = [m / tot_w for m in mix]
     experts = []                                       # (layer, idx, importance, usage, floor K)
     for l in layers:
         tok = max(st[l]["tokens"], 1)
@@ -94,7 +114,8 @@ def main():
                 imp = E / max(st[l]["resid_out_energy"], 1e-12)
             floor = a.protect_k if a.protect_share and E / etot >= a.protect_share else ks[0]
             floor = max(floor, layer_floor.get(l, ks[0]))
-            experts.append((l, e, imp, c / tok, min(max(floor, ks[0]), ks[-1])))
+            use = usage_of[l][e] if usage_of is not None else c / tok
+            experts.append((l, e, imp, use, min(max(floor, ks[0]), ks[-1])))
     n = len(experts)
     if a.score:
         inv = {v: k for k, v in CHAR.items()}

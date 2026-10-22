@@ -5,10 +5,18 @@ deepseek-v41-tp2) under the Apache License, Version 2.0 (the license text: LICEN
                       our launcher and binding.
   csrc/exl3_rdma.cu   the RDMA all-reduce: rings, flags, doorbell and CPU proxy from TensorFold's one-hop gather
                       (src/tensorfold/cuda/rdma_gather.cu, v5); the fp32 rank-order sum and the vLLM hook (rdma.py) are ours.
-  l2pf.py             the prefetch points and their pacing follow TensorFold's design; the code is ours.
+  l2pf.py             the prefetch points and their pacing follow TensorFold's design, and so do EXL3_L2PF_ORDER's
+                      8 MiB MoE fork (families/deepseek_v41/cuda/model.py L2_MOE_MB, commit bd0024d) and head
+                      fork after the last layer (rounds.py _l2_next, commit f464b09e); the code is ours.
   sparse_attn.py      the split-over-keys + ordered-merge structure follows TensorFold's DeepSeek-V4.1 sparse attention
                       (_sparse_attn_part / _sparse_attn_merge); the kernels are ours.
   csrc/exl3_smoe.cu   the shared expert as one more slot of the routed-expert launch is TensorFold's idea; the kernel is ours.
+  csrc/exl3_mrow.cu, csrc/exl3_smoe.cu (EXL3_L2_DISCARD)
+                      dropping the dead fp32 decode scratch from L2 once summed (discard.global.L2) is TensorFold's
+                      idea (commit bd0024d, TF_EXL3_L2_DISCARD); the code is ours.
+  csrc/exl3_router.cu (ROUTER_PF), csrc/exl3_mrow.cu (MROW_L2PF)
+                      loading or prefetching a kernel's weights before griddepcontrol.wait follows TensorFold's
+                      kernels; the code is ours.
 
 Copied unchanged from the same branch at commit 90b68e06 (src/tensorfold/cuda/exl3/), TensorFold's EXL3 module (its
 decoders follow ExLlamaV3's EXL3 format, MIT, Copyright (c) 2025 Turboderp; see LICENSE.exllamav3):

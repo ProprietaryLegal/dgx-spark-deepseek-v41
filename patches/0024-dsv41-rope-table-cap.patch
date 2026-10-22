@@ -1,0 +1,85 @@
+After HeNryous's patch 0033a (github.com/HeNryous/deepseek-v41-1017-dgx-spark, patches/0033a-dsv41-rope-cap.patch at
+cef176c, Apache-2.0: "RoPE cos / sin cache only to max_len + 2048"), our rework; against vLLM main 6e517b15 + patches
+0001-0023 (touches none of their files).
+DeepSeek-V4.1's fp32 RoPE tables built only as far as the serve reaches. DeepseekV4ScalingRotaryEmbedding computes
+max_position_embeddings x factor rows of cos / sin on the GPU at model init: 1,048,576 x 64 fp32 = 256 MiB a table, and
+V4.1 holds two (the compressed layers' YaRN table, theta 160000 x 16; the sliding-window layers' plain one, theta 10000,
+which the DSpark drafter's layers share through get_rope's cache). Rows now stop at max(max_model_len,
+max_num_batched_tokens) + 2048: at the launcher's MAX_LEN 262144 / MAX_BATCH 2048, 264,192 rows, so 2 x 784,384 rows x
+256 B = 383 MiB (0.37 GiB) less per rank from load on (from the shapes, not measured; HeNryous quotes -0.34 GiB a rank
+at 320K).
+Numerics: a row is t x inv_freq (one product an element, no sum) then cos and sin, and inv_freq (the YaRN ramp, from
+original_max_position_embeddings) does not depend on the row count, so every row kept has the bits it had.
+Failure mode: a position at or past the cap would be read out of bounds (the RoPE kernels do not check), and none gets
+there: the scheduler keeps every position under max_model_len (spec tokens included), DSpark clamps its draft block to
+max_model_len - 1 (dflash/speculator.py), dummy and capture runs stay inside max(max_model_len, max_num_batched_tokens)
+(input_batch.py clamps their context). The 2048 rows are slack; the max_num_batched_tokens term covers a token budget
+above max_model_len, which HeNryous's max_model_len + 2048 does not. No vLLM config (the layer built on its own): the
+full table. VLLM_DSV41_ROPE_CAP=0 builds the full tables again. Startup log: "DeepSeek-V4 RoPE tables: 264192 of 1048576
+rows". Test: patches/tests/test_dsv41_memory_caps.py (CPU).
+
+diff --git a/vllm/model_executor/layers/rotary_embedding/deepseek_scaling_rope.py b/vllm/model_executor/layers/rotary_embedding/deepseek_scaling_rope.py
+index 46e06371f..0a1959a26 100644
+--- a/vllm/model_executor/layers/rotary_embedding/deepseek_scaling_rope.py
++++ b/vllm/model_executor/layers/rotary_embedding/deepseek_scaling_rope.py
+@@ -221,6 +221,51 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
+             return self.forward_native(positions, query, key, offsets)
+ 
+ 
++# dsv41 patch 0024: slack rows a DeepSeek-V4 RoPE table keeps past the furthest
++# position the engine schedules.
++_DSV41_ROPE_MARGIN = 2048
++
++
++def _dsv41_rope_rows(full: float) -> float:
++    """dsv41 patch 0024: how many rows of a DeepSeek-V4 fp32 cos / sin table to build.
++
++    The checkpoint asks for max_position_embeddings x factor rows (V4.1: 1,048,576,
++    256 MiB a table at rotary dim 64). Positions stay below
++    max(max_model_len, max_num_batched_tokens): requests stop at max_model_len,
++    DSpark clamps its draft block to max_model_len - 1, dummy runs stay inside the
++    token budget. Build that + _DSV41_ROPE_MARGIN rows. Each row is computed on its
++    own (t x inv_freq, then cos / sin), so the rows kept are the same bits. Without
++    a vLLM config (the layer built alone) or with VLLM_DSV41_ROPE_CAP=0: the full
++    table.
++    """
++    import os
++
++    if os.environ.get("VLLM_DSV41_ROPE_CAP", "1") == "0":
++        return full
++    from vllm.config import get_current_vllm_config_or_none
++
++    config = get_current_vllm_config_or_none()
++    model_config = getattr(config, "model_config", None)
++    if model_config is None:
++        return full
++    scheduler_config = getattr(config, "scheduler_config", None)
++    reach = max(
++        model_config.max_model_len,
++        getattr(scheduler_config, "max_num_batched_tokens", 0) or 0,
++    )
++    rows = min(full, reach + _DSV41_ROPE_MARGIN)
++    if rows < full:
++        from vllm.logger import init_logger
++
++        init_logger(__name__).info_once(
++            "DeepSeek-V4 RoPE tables: %d of %d rows (patch 0024; "
++            "VLLM_DSV41_ROPE_CAP=0 builds them whole)",
++            int(rows),
++            int(full),
++        )
++    return rows
++
++
+ class DeepseekV4ScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
+     """RotaryEmbedding extended with YaRN method.
+ 
+@@ -244,7 +289,7 @@ class DeepseekV4ScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
+     def _compute_cos_sin_cache(self) -> torch.Tensor:
+         inv_freq = self._compute_inv_freq(self.scaling_factor)
+         t = torch.arange(
+-            self.max_position_embeddings * self.scaling_factor,
++            _dsv41_rope_rows(self.max_position_embeddings * self.scaling_factor),
+             device=inv_freq.device,
+             dtype=torch.float32,
+         )

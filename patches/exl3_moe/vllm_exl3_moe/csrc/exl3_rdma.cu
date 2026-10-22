@@ -157,14 +157,10 @@ __global__ void __launch_bounds__(STAGE_THREADS) stage_kernel(const uint4* __res
     }
 }
 
-// Wait for every peer's flag at this sequence, then out = sum over ranks in rank order (this rank's part from `own`).
-__global__ void __launch_bounds__(SUM_THREADS) sum_kernel(const uint4* __restrict__ own, uint4* __restrict__ out,
-                                                           int n16, const char* recv_ring, const uint64_t* flags,
-                                                           const uint64_t* seq, int rank, int world, int slots,
-                                                           uint64_t max_bytes, const uint64_t* abort_word,
-                                                           const uint64_t* rflags, int nd) {
-    const uint64_t q = *seq;
-    const int slot = (int)(q % slots);
+// Every block of the summing or gathering kernel: wait until each peer's part of sequence q is in its receive slot (the
+// proxy's flag, or with flag-write the flags the peers' NICs wrote, one a (peer, device)).
+__device__ __forceinline__ void wait_peers(uint64_t q, int slot, const uint64_t* flags, int rank, int world,
+                                           const uint64_t* abort_word, const uint64_t* rflags, int nd) {
     if (rflags == nullptr) {
         if (threadIdx.x < world && threadIdx.x != rank)
             for (uint32_t i = 1; load_sys(flags + (size_t)slot * world + threadIdx.x) < q; ++i)
@@ -175,6 +171,17 @@ __global__ void __launch_bounds__(SUM_THREADS) sum_kernel(const uint4* __restric
             if ((i & 1023) == 0 && load_sys(abort_word)) break;
     }
     __syncthreads();
+}
+
+// Wait for every peer's flag at this sequence, then out = sum over ranks in rank order (this rank's part from `own`).
+__global__ void __launch_bounds__(SUM_THREADS) sum_kernel(const uint4* __restrict__ own, uint4* __restrict__ out,
+                                                           int n16, const char* recv_ring, const uint64_t* flags,
+                                                           const uint64_t* seq, int rank, int world, int slots,
+                                                           uint64_t max_bytes, const uint64_t* abort_word,
+                                                           const uint64_t* rflags, int nd) {
+    const uint64_t q = *seq;
+    const int slot = (int)(q % slots);
+    wait_peers(q, slot, flags, rank, world, abort_word, rflags, nd);
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n16; i += gridDim.x * blockDim.x) {
         float acc[8];
 #pragma unroll
@@ -200,6 +207,32 @@ __global__ void __launch_bounds__(SUM_THREADS) sum_kernel(const uint4* __restric
 #pragma unroll
         for (int e = 0; e < 4; ++e) o[e] = __floats2bfloat162_rn(acc[2 * e], acc[2 * e + 1]);
         out[i] = r;
+    }
+}
+
+// Wait as sum_kernel does, then out = the ranks' tensors concatenated along their last dimension in rank order: row r of
+// rank p (row4 4-byte words) lands at out row r, words [p * row4, (p + 1) * row4). A byte copy: every rank holds the same
+// bits, whatever the dtype (the decode path's (value, index) pairs are fp32). row4 = the whole tensor with rows = 1
+// gives the dim-0 concatenation.
+__global__ void __launch_bounds__(SUM_THREADS) gather_kernel(const uint32_t* __restrict__ own, uint32_t* __restrict__ out,
+                                                              int rows, int row4, const char* recv_ring,
+                                                              const uint64_t* flags, const uint64_t* seq, int rank,
+                                                              int world, int slots, uint64_t max_bytes,
+                                                              const uint64_t* abort_word, const uint64_t* rflags, int nd) {
+    const uint64_t q = *seq;
+    const int slot = (int)(q % slots);
+    wait_peers(q, slot, flags, rank, world, abort_word, rflags, nd);
+    const int n4 = rows * row4;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < world * n4; i += gridDim.x * blockDim.x) {
+        const int p = i / n4, k = i - p * n4, r = k / row4, j = k - r * row4;
+        uint32_t v;
+        if (p == rank) {
+            v = own[k];
+        } else {
+            const uint32_t* in = reinterpret_cast<const uint32_t*>(recv_ring + ((size_t)slot * world + p) * max_bytes);
+            v = __ldcv(in + k);
+        }
+        out[(size_t)r * world * row4 + (size_t)p * row4 + j] = v;
     }
 }
 
@@ -567,6 +600,37 @@ void all_reduce(int64_t h, const at::Tensor& x, at::Tensor out) {
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// out = the ranks' x concatenated along x's last dimension (rows x row4 4-byte words a rank), on the current stream.
+// `src` holds x's bytes padded to a multiple of 16 (the stage copies 16-byte units), 16-byte aligned; nbytes = x's bytes.
+void all_gather(int64_t h, const at::Tensor& src, at::Tensor out, int64_t rows, int64_t row4, int64_t nbytes) {
+    Ring& g = get(h);
+    TORCH_CHECK(src.is_cuda() && out.is_cuda() && src.is_contiguous() && out.is_contiguous(),
+                "rdma all-gather: contiguous CUDA tensors");
+    TORCH_CHECK(rows >= 1 && row4 >= 1 && rows * row4 * 4 == nbytes, "rdma all-gather: rows x row4 words must be x's bytes");
+    const int64_t padded = (nbytes + 15) / 16 * 16;
+    TORCH_CHECK(src.numel() * src.element_size() >= padded && (uint64_t)padded <= g.max_bytes,
+                "rdma all-gather: ", nbytes, " bytes (staged ", padded, ", at most ", g.max_bytes, ")");
+    TORCH_CHECK(out.numel() * out.element_size() == nbytes * g.world, "rdma all-gather: out must hold every rank's bytes");
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(src.data_ptr()) % 16 == 0 && reinterpret_cast<uintptr_t>(out.data_ptr()) % 4 == 0,
+                "rdma all-gather: src 16-byte aligned, out 4-byte aligned");
+    if (g.failed.load()) TORCH_CHECK(false, "rdma all-gather: ", g.why);
+    const int n16 = (int)(padded / 16);
+    auto stream = c10::cuda::getCurrentCUDAStream();
+    const int sblocks = std::max(1, std::min(16, (n16 + 1023) / 1024));
+    stage_kernel<<<sblocks, STAGE_THREADS, 0, stream>>>(reinterpret_cast<const uint4*>(src.data_ptr()), n16,
+                                                        dev(g.send_ring), dev(g.sizes), dev(g.doorbell), dev(g.sent),
+                                                        g.seq, g.slots, g.max_bytes, dev(g.abort_word), g.staged);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    const int total = (int)(rows * row4) * g.world;
+    const int blocks = std::max(1, std::min(48, (total + SUM_THREADS - 1) / SUM_THREADS));
+    gather_kernel<<<blocks, SUM_THREADS, 0, stream>>>(reinterpret_cast<const uint32_t*>(src.data_ptr()),
+                                                      reinterpret_cast<uint32_t*>(out.data_ptr()), (int)rows, (int)row4,
+                                                      dev(g.recv_ring), dev(g.flags), g.seq, g.rank, g.world, g.slots,
+                                                      g.max_bytes, dev(g.abort_word), g.flagw ? dev(g.rflags) : nullptr,
+                                                      (int)g.nics.size());
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 }  // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -579,4 +643,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("abort", &abort_all);
     m.def("max_bytes", &max_bytes);
     m.def("all_reduce", &all_reduce);
+    m.def("all_gather", &all_gather);
 }

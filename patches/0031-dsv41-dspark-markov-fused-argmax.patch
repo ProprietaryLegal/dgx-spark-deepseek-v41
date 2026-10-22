@@ -1,0 +1,223 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0021 + 0023-0030 (touches nvidia/dspark.py
+and nvidia/ops/markov_cache.py). VLLM_DSPARK_MARKOV_FUSED=1 (default off; needs VLLM_DSPARK_LOCAL_ARGMAX=1 and the
+Markov cache): each of the five Markov steps of DSpark's local draft argmax runs the bias (the cached row of the
+previous token, or markov_w2 @ markov_embed for an uncached one), its add to the shard's base logits and the shard's
+max in two launches: a (max, first argmax) per 128 columns, then a per-row reduction to the (value, global index)
+pair the all-gather sends. Today's path launches the bias kernel, the add, torch.max (12.5 us on GB10 at 5 rows) and
+the pair's stacking (~6 launches); the Oct 21 prose trace has the Markov phase at 0.48 ms a round. Same arithmetic and
+rounding points (the bias rounded to the cache's dtype, the add in fp32 rounded to the logits' dtype, ties to the
+lowest index as torch.max), so the drafts are the unfused path's bit for bit: acceptance and greedy text cannot move.
+On an RTX 5090 (graph replay, 5 rows): 20.6 -> 16.9 us with every row cached, 32.5 -> 25.9 us with one uncached row.
+Test: patches/tests/test_dspark_markov_fused.py (serve image, GPU: 19 cases bit-equal to the unfused path, incl.
+forced ties and graph replay; also run on an RTX 5090 against a stand-in vllm package).
+
+diff --git a/vllm/models/deepseek_v41/nvidia/dspark.py b/vllm/models/deepseek_v41/nvidia/dspark.py
+index 12bfad0..29a5044 100644
+--- a/vllm/models/deepseek_v41/nvidia/dspark.py
++++ b/vllm/models/deepseek_v41/nvidia/dspark.py
+@@ -71,6 +71,10 @@ from .model import (
+ 
+ logger = init_logger(__name__)
+ 
++# VLLM_DSPARK_MARKOV_FUSED=1: the local draft argmax's Markov bias, add and max in
++# two launches (ops/markov_cache.py argmax_pair), the same drafts bit for bit.
++_MARKOV_FUSED = os.environ.get("VLLM_DSPARK_MARKOV_FUSED", "0") == "1"
++
+ # MoE expert scale suffix differs by expert dtype (mirrors deepseek_v4 loaders):
+ # fp4 experts register ``.weight_scale``; block-fp8 experts ``.weight_scale_inv``.
+ _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.w[123]\.scale$")
+@@ -531,10 +535,16 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
+         logits returns."""
+         assert self._markov_cache_local is not None
+         lo, hi = self._vocab_shard()
+-        bias = self._markov_cache_local(token_ids, markov_embed)
+-        logits = base_local[:, : hi - lo] + bias
+-        vals, idx = logits.max(dim=-1)
+-        pair = torch.stack([vals.float(), (idx + lo).float()], dim=-1)
++        if _MARKOV_FUSED and base_local.stride(-1) == 1:
++            # bias + add + the shard's max in two launches, bit for bit the same pair
++            pair = self._markov_cache_local.argmax_pair(
++                token_ids, markov_embed, base_local, hi - lo, lo
++            )
++        else:
++            bias = self._markov_cache_local(token_ids, markov_embed)
++            logits = base_local[:, : hi - lo] + bias
++            vals, idx = logits.max(dim=-1)
++            pair = torch.stack([vals.float(), (idx + lo).float()], dim=-1)
+         tp = self.lm_head.tp_size
+         gathered = tensor_model_parallel_all_gather(pair, dim=-1).view(-1, tp, 2)
+         best = gathered[:, :, 0].argmax(dim=-1, keepdim=True)
+diff --git a/vllm/models/deepseek_v41/nvidia/ops/markov_cache.py b/vllm/models/deepseek_v41/nvidia/ops/markov_cache.py
+index e040da0..b079c72 100644
+--- a/vllm/models/deepseek_v41/nvidia/ops/markov_cache.py
++++ b/vllm/models/deepseek_v41/nvidia/ops/markov_cache.py
+@@ -15,6 +15,13 @@ implementation.
+ VLLM_DSPARK_MARKOV_CACHE: a JSON list of token ids to cache (most frequent
+ first); VLLM_DSPARK_MARKOV_CACHE_ROWS caps how many are used (default 4096).
+ 
++``MarkovBiasCache.argmax_pair`` (VLLM_DSPARK_MARKOV_FUSED=1 in the local draft
++argmax): the bias, the add to the base logits and the shard's max in two launches,
++a (max, first argmax) per 128 columns then a per-row reduction to the (value,
++global index) pair the all-gather sends, instead of the bias kernel, the add,
++torch.max and the pair's stacking. Same arithmetic and rounding points, ties to
++the lowest index as torch.max: the drafts are the unfused path's bit for bit.
++
+ ``w2`` may be a contiguous row range of markov_w2 (one TP rank's vocabulary
+ shard, for the local draft argmax): rows are then that range's bias, still keyed
+ by the previous token over the whole vocabulary (``w1``'s rows).
+@@ -73,6 +80,128 @@ def _markov_bias_kernel(
+         )
+ 
+ 
++_ARGMAX_BLOCK_V = 128
++
++
++@triton.jit
++def _markov_argmax_partial_kernel(
++    ids_ptr,
++    slot_ptr,
++    cache_ptr,
++    emb_ptr,
++    w2_ptr,
++    base_ptr,
++    pval_ptr,
++    pidx_ptr,
++    V,
++    cache_stride,
++    w2_stride,
++    emb_stride,
++    base_stride,
++    nblk,
++    R: tl.constexpr,
++    BLOCK_V: tl.constexpr,
++    SUB_V: tl.constexpr,
++):
++    b = tl.program_id(0)
++    blk = tl.program_id(1)
++    tok = tl.load(ids_ptr + b).to(tl.int64)
++    slot = tl.load(slot_ptr + tok)
++    best_v = float("-inf")
++    best_i = V
++    r = tl.arange(0, R)
++    for s in tl.static_range(0, BLOCK_V, SUB_V):
++        cols = blk * BLOCK_V + s + tl.arange(0, SUB_V)
++        mask = cols < V
++        if slot >= 0:
++            bias = tl.load(
++                cache_ptr + slot.to(tl.int64) * cache_stride + cols, mask=mask, other=0.0
++            )
++        else:
++            # _markov_bias_kernel's arithmetic, rounded to the cached rows' dtype
++            e = tl.load(emb_ptr + b * emb_stride + r).to(tl.float32)
++            w = tl.load(
++                w2_ptr + cols[:, None].to(tl.int64) * w2_stride + r[None, :],
++                mask=mask[:, None],
++                other=0.0,
++            )
++            bias = tl.sum(w.to(tl.float32) * e[None, :], axis=1).to(
++                cache_ptr.dtype.element_ty
++            )
++        base = tl.load(base_ptr + b * base_stride + cols, mask=mask, other=0.0)
++        # torch's add of the two: fp32 arithmetic, rounded to the logits' dtype
++        x = (base.to(tl.float32) + bias.to(tl.float32)).to(base_ptr.dtype.element_ty)
++        x = tl.where(mask, x.to(tl.float32), float("-inf"))
++        m = tl.max(x, axis=0)
++        i = tl.min(tl.where(x == m, cols, V), axis=0)
++        take = m > best_v  # strictly: an earlier sub-block keeps a tie
++        best_i = tl.where(take, i, best_i)
++        best_v = tl.where(take, m, best_v)
++    tl.store(pval_ptr + b * nblk + blk, best_v)
++    tl.store(pidx_ptr + b * nblk + blk, best_i)
++
++
++@triton.jit
++def _markov_argmax_final_kernel(pval_ptr, pidx_ptr, pair_ptr, nblk, lo, NB: tl.constexpr):
++    b = tl.program_id(0)
++    j = tl.arange(0, NB)
++    mask = j < nblk
++    v = tl.load(pval_ptr + b * nblk + j, mask=mask, other=float("-inf"))
++    i = tl.load(pidx_ptr + b * nblk + j, mask=mask, other=2147483647)
++    m = tl.max(v, axis=0)
++    k = tl.min(tl.where(v == m, i, 2147483647), axis=0)
++    tl.store(pair_ptr + b * 2, m)
++    tl.store(pair_ptr + b * 2 + 1, (k + lo).to(tl.float32))
++
++
++def markov_argmax_pair(
++    token_ids: torch.Tensor,
++    slot_of_token: torch.Tensor,
++    cache: torch.Tensor,
++    markov_embed: torch.Tensor,
++    w2: torch.Tensor,
++    base_local: torch.Tensor,
++    vocab: int,
++    lo: int,
++) -> torch.Tensor:
++    """[rows, 2] fp32: (max, lo + first argmax) of base_local[:, :vocab] + bias per
++    row, the bias as markov_bias_rows gives it."""
++    num_rows, rank = markov_embed.shape
++    assert w2.stride(1) == 1 and markov_embed.stride(1) == 1
++    assert base_local.stride(1) == 1
++    nblk = triton.cdiv(vocab, _ARGMAX_BLOCK_V)
++    dev = base_local.device
++    pval = torch.empty((num_rows, nblk), dtype=torch.float32, device=dev)
++    pidx = torch.empty((num_rows, nblk), dtype=torch.int32, device=dev)
++    pair = torch.empty((num_rows, 2), dtype=torch.float32, device=dev)
++    if num_rows == 0:
++        return pair
++    _markov_argmax_partial_kernel[(num_rows, nblk)](
++        token_ids,
++        slot_of_token,
++        cache,
++        markov_embed,
++        w2,
++        base_local,
++        pval,
++        pidx,
++        vocab,
++        cache.stride(0),
++        w2.stride(0),
++        markov_embed.stride(0),
++        base_local.stride(0),
++        nblk,
++        R=rank,
++        BLOCK_V=_ARGMAX_BLOCK_V,
++        SUB_V=_BLOCK_V,
++        num_warps=4,
++    )
++    _markov_argmax_final_kernel[(num_rows,)](
++        pval, pidx, pair, nblk, lo, NB=triton.next_power_of_2(nblk), num_warps=1
++    )
++    return pair
++
++
+ def markov_bias_rows(
+     token_ids: torch.Tensor,
+     slot_of_token: torch.Tensor,
+@@ -149,6 +278,26 @@ class MarkovBiasCache:
+             path,
+         )
+ 
++    def argmax_pair(
++        self,
++        token_ids: torch.Tensor,
++        markov_embed: torch.Tensor,
++        base_local: torch.Tensor,
++        vocab: int,
++        lo: int,
++    ) -> torch.Tensor:
++        """(max, lo + argmax) of base_local[:, :vocab] + this cache's bias, per row."""
++        return markov_argmax_pair(
++            token_ids,
++            self.slot_of_token,
++            self.cache,
++            markov_embed.contiguous(),
++            self.w2,
++            base_local,
++            vocab,
++            lo,
++        )
++
+     def __call__(self, token_ids: torch.Tensor, markov_embed: torch.Tensor):
+         out = torch.empty(
+             (markov_embed.shape[0], self.w2.shape[0]),

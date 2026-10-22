@@ -122,3 +122,27 @@ def test_drafter_dense_routing(monkeypatch):
     q["exl3_moe"]["dense"]["drafter"] = {"attn.wo_a": 5}
     with pytest.raises(ValueError, match="unsupported"):
         C.DeepseekV41Exl3Config.from_config(q)
+
+
+def test_woa_qdq_hooks_only_fp8_wo_a(monkeypatch):
+    """VLLM_DSV41_WOA_QDQ=1: a wo_a that stays FP8 (the DSpark drafter's) keeps the checkpoint's method object and class
+    (vLLM picks the weight loader by the class name) with the round trip added to its loading (woa_qdq.hook_fp8); other
+    FP8 linears are untouched and the backbone's EXL3 wo_a does it itself (dense.py); nothing changes with the flag off."""
+    vllm_exl3_moe.register()
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    import vllm_exl3_moe.config as C
+    from vllm_exl3_moe.dense import Exl3DenseLinearMethod
+
+    monkeypatch.setattr(C, "_num_hidden_layers", lambda: 40)
+    q = ours()
+    q["exl3_moe"]["dense"] = {"k": {"attn.wo_a": 5}, "layers": [0, 39]}
+    cfg = C.DeepseekV41Exl3Config.from_config(q)
+    col = ColumnParallelLinear.__new__(ColumnParallelLinear)
+    monkeypatch.delenv("VLLM_DSV41_WOA_QDQ", raising=False)
+    plain = cfg.get_quant_method(col, "model.layers.40.attn.wo_a")
+    assert "process_weights_after_loading" not in vars(plain)
+    monkeypatch.setenv("VLLM_DSV41_WOA_QDQ", "1")
+    m = cfg.get_quant_method(col, "model.layers.40.attn.wo_a")
+    assert type(m) is type(plain) and "process_weights_after_loading" in vars(m)
+    assert "process_weights_after_loading" not in vars(cfg.get_quant_method(col, "model.layers.40.attn.wq_b"))
+    assert isinstance(cfg.get_quant_method(col, "model.layers.3.attn.wo_a"), Exl3DenseLinearMethod)

@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 [ "$(pwd -P)" = "$(cd ~/dsv41_recipe 2>/dev/null && pwd -P)" ] || { echo "clone this repo to ~/dsv41_recipe first (the image scripts read from there)"; exit 1; }
 PEER=${PEER:?ssh name of the other Spark}
-TAG=${TAG:-dsv41-serve:v4}
+TAG=${TAG:-dsv41-serve:v5}   # v2.0: patches 0023-0038 and the plugin as of v2.0 (v1.x: dsv41-serve:v4)
 VLLM_PIN=6e517b15c1833cf72a7f557ee32524d98682e617
 VLLM_SRC=${VLLM_SRC:-$HOME/src/vllm-main-6e517b15}
 X3_SRC=${X3_SRC:-$HOME/src/exllamav3-v1.6.0}

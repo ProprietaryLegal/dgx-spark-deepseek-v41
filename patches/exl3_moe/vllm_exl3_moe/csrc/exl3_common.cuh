@@ -226,6 +226,14 @@ __device__ __forceinline__ void l2_prefetch(const void* src, uint32_t bytes)
     asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;\n" :: "l"(src), "r"(bytes) : "memory");
 }
 
+// Drop the 128-byte L2 line at `line` (128-byte aligned, global memory) without writing it back (discard.global.L2,
+// sm_80+). The memory model treats it as a weak write of an indeterminate value: every read of those bytes must happen
+// before it, and nothing may read them again until they are written. For dead scratch only (the *_L2_DISCARD builds).
+__device__ __forceinline__ void l2_discard(const void* line)
+{
+    asm volatile("discard.global.L2 [%0], 128;\n" :: "l"(__cvta_generic_to_global(line)) : "memory");
+}
+
 // Programmatic dependent launch (PDL): a kernel launched with programmatic stream serialization may start while the
 // previous kernel in the stream is still running. griddep_wait blocks until that kernel has completed and its writes
 // are visible (a no-op without PDL); griddep_launch lets this grid's own dependents start once every block has issued

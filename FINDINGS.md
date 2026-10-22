@@ -94,6 +94,38 @@ measurement behind it and what the recipe does about it. Speeds are `kit_bench.p
     KLD, so the caps came from another pack measured on the same checkpoint and panel (LibertAIDAI's
     1017 EXL3 2.9 bpw).
 
+## From the v2.0 build
+
+24. **Compare engines in one session, alternating fresh boots.** One configuration moved 0.3-0.7 ms a verify round
+    (about 1.5%) from one fresh boot to the next. Over 16 boots of one configuration, prose rounds ran 35.36-35.99 ms,
+    faster with more free 2 MiB-and-up blocks at boot (r = -0.56 on prose against 72-116 GB of them, about -0.085 ms a
+    round per 10 GB more); a box up 12 days never got past ~65 GB, its movable memory split into pieces compaction does
+    not merge, and only a reboot resets that. Numbers from different days carry each day's memory state, so v2.0's
+    speed claim comes from one session with TensorFold and our serve on alternating boots, the same memory preparation
+    before each.
+25. **The confidence head is weakest where speculative decoding matters most.** DeepSeek's DSpark confidence head
+    separates accepted from rejected drafts at AUC 0.90 on code and 0.83 / 0.82 on writing / chat. Each draft's own
+    logit margin and top-1 probability, from the logits the drafter already computes, through 4 weights a draft
+    position fitted to the pack's acceptance, gave code +1.1%, prose +1.8% and structured output level, measured
+    request by request in one boot. A larger predictor (a residual MLP refit on 1.2M rounds) tied it at AUC 0.91-0.92:
+    the hindsight oracle's +14% needs information these inputs do not have.
+26. **The round-cost table moves code, not prose.** Re-measured after the engine work, the table raised code 1.7%
+    (4.36 to 4.47 tokens a round) and left prose and structured inside noise. On prose the fitted depth rule's 58.0
+    tok/s beat the best fixed depth (depth 2: 55.8) by 4%.
+27. **Targeted bit moves cost several times what the models predict.** The allocator and the sensitivity model price
+    broad budgets well, and they mispriced narrow moves: the late layers' dense linears at K4 cost +0.00042 KLD, 5x the
+    sensitivity model's estimate, and a decode cap on a prose-leaning usage mix +0.00043, 7x the allocator's. Measure a
+    targeted move before spending a KLD budget on it.
+28. **PDL hides small kernels.** With programmatic dependent launch, a 4.8 us normalization kernel in the prose round
+    cost about 0.9 us of the critical chain; fusing the small kernels between two MoE phases is worth 1-3 us a layer,
+    not their traced durations.
+29. **An L2 discard can change the outputs under all-reduce traffic.** Dropping the dead fp32 scratch of the dense
+    decode kernel from L2 (`discard.global.L2`) drifted greedy outputs on GB10 in 5 of 234 requests (0 of 234 without
+    it, logprob fingerprints, prompts switched mid-run); the same change in the routed-expert kernel stayed clean and
+    bought nothing. Neither ships.
+
 Measured and dropped (each A/B in `BENCHMARKS.md`): PIECEWISE graphs, eager all-reduces in FULL graphs (patch 0009),
 FlashInfer's decode kernel for verify rows, top-64 Markov drafting, int8 activations, Engram wkv at K4, a speed-aware
-expert budget, the drafter's dense at K3 / K4, pinning vLLM to the fast CPU cores.
+expert budget, the drafter's dense at K3 / K4, pinning vLLM to the fast CPU cores. Since v2.0: the L2 discard, bf16 mHC
+mixing weights, a flag-write all-reduce, the ring all-gather, a fused route phase, richer draft features, an
+acceptance predictor from request history, an 8,192-row Markov cache, a locked GPU clock and a higher boost level.

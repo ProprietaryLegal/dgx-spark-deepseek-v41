@@ -1,0 +1,107 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0021 + 0023-0037 (touches
+spec_decode/depth_policy.py only). VLLM_DSPARK_DEPTH_FUSED=1 (default 0): patch 0010's conf rule and its write into
+the requests' depth slots run as one Triton launch (_choose_depth_kernel: clamp, the survival product and the expected
+tokens per ms by depth, the first maximum, stored at each request's slot) instead of ~13 small eager launches (clamp,
+two scans, cat, divide, argmax, casts, index_copy_), and dead_rows as one launch (3 before). The next round's input
+prep runs these eagerly, ~4 us apart on GB10 (Oct 21 prose trace: 109 eager launches between the last Markov step
+and the next embedding). Same rule in fp32 with IEEE division; the running product and sum may associate differently
+from torch's scans in the last bit, so a near-tie can pick the other depth, and the depth never changes which tokens
+come out (rows past it are only not verified).
+Test: patches/tests/test_dspark_depth_fused.py (serve image).
+
+diff --git a/vllm/v1/worker/gpu/spec_decode/depth_policy.py b/vllm/v1/worker/gpu/spec_decode/depth_policy.py
+index 7ce1613..1fd5d6b 100644
+--- a/vllm/v1/worker/gpu/spec_decode/depth_policy.py
++++ b/vllm/v1/worker/gpu/spec_decode/depth_policy.py
+@@ -59,6 +59,7 @@ import numpy as np
+ import torch
+ 
+ from vllm.logger import init_logger
++from vllm.triton_utils import tl, triton
+ 
+ logger = init_logger(__name__)
+ 
+@@ -142,6 +143,43 @@ def _is_rank0() -> bool:
+     return not dist.is_initialized() or dist.get_rank() == 0
+ 
+ 
++# VLLM_DSPARK_DEPTH_FUSED=1 (default 0): the conf rule and its write into the depth slots
++# in one launch (_choose_depth_kernel) instead of ~13 small ones (clamp, two scans, cat,
++# divide, argmax, casts, index_copy), and dead_rows in one (3 before); the next round's
++# input prep runs these eagerly, ~4 us apart on GB10. The same rule in fp32 with a
++# running product and sum (the scans' association may differ in the last bit, so a
++# near-tie can pick the other depth; the depth never changes which tokens come out).
++_DEPTH_FUSED = os.environ.get("VLLM_DSPARK_DEPTH_FUSED", "0") == "1"
++
++
++@triton.jit
++def _choose_depth_kernel(conf_ptr, conf_stride, idx_ptr, cost_ptr, depth_ptr, K: tl.constexpr):
++    r = tl.program_id(0)
++    best_d = 0
++    best_v = tl.math.div_rn(1.0, tl.load(cost_ptr))
++    surv = 1.0
++    cum = 0.0
++    for d in tl.static_range(1, K + 1):
++        c = tl.load(conf_ptr + r * conf_stride + (d - 1)).to(tl.float32)
++        surv = surv * tl.minimum(tl.maximum(c, 0.0), 1.0)
++        cum = cum + surv
++        v = tl.math.div_rn(1.0 + cum, tl.load(cost_ptr + d))  # IEEE, as torch's divide
++        take = v > best_v  # strictly: the shallowest depth keeps a tie, as torch.argmax
++        best_d = tl.where(take, d, best_d)
++        best_v = tl.where(take, v, best_v)
++    tl.store(depth_ptr + tl.load(idx_ptr + r), best_d.to(tl.int32))
++
++
++@triton.jit
++def _dead_rows_kernel(idx_ptr, pos_ptr, depth_ptr, out_ptr, n, BLOCK: tl.constexpr):
++    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
++    m = i < n
++    idx = tl.load(idx_ptr + i, mask=m, other=0)
++    pos = tl.load(pos_ptr + i, mask=m, other=0)
++    dep = tl.load(depth_ptr + idx, mask=m, other=0)
++    tl.store(out_ptr + i, pos > dep, mask=m)
++
++
+ def choose_depth(confidence_probs: torch.Tensor, cost_ms: torch.Tensor) -> torch.Tensor:
+     """[n, k] per-position acceptance probabilities -> [n] int32 depths in 0..k."""
+     conf = confidence_probs.float().clamp(0.0, 1.0)
+@@ -368,6 +406,18 @@ class DSparkDepthPolicy:
+                     )
+             if self.inv_temp is not None:
+                 conf = calibrate(conf, self.inv_temp, self.bias)
++            if (
++                _DEPTH_FUSED
++                and conf.dtype == torch.float32
++                and conf.stride(1) == 1
++                and idx_mapping.dtype == torch.int32
++                and self.cost_ms.numel() == self.k + 1
++                and conf.shape[1] == self.k
++            ):
++                _choose_depth_kernel[(num_reqs,)](
++                    conf, conf.stride(0), idx_mapping, self.cost_ms, self.depth, K=self.k
++                )
++                return
+             depth = choose_depth(conf, self.cost_ms)
+         self.depth.index_copy_(0, idx_mapping[:num_reqs].long(), depth)
+ 
+@@ -375,6 +425,20 @@ class DSparkDepthPolicy:
+         self, expanded_idx_mapping: torch.Tensor, expanded_local_pos: torch.Tensor
+     ) -> torch.Tensor:
+         """Logits rows past their request's depth: local position p holds draft p."""
++        n = expanded_local_pos.numel()
++        if (
++            _DEPTH_FUSED
++            and n > 0
++            and expanded_idx_mapping.dtype == torch.int32
++            and expanded_local_pos.dtype == torch.int32
++            and expanded_idx_mapping.is_contiguous()
++            and expanded_local_pos.is_contiguous()
++        ):
++            out = torch.empty(n, dtype=torch.bool, device=expanded_local_pos.device)
++            _dead_rows_kernel[(triton.cdiv(n, 256),)](
++                expanded_idx_mapping, expanded_local_pos, self.depth, out, n, BLOCK=256
++            )
++            return out
+         return expanded_local_pos > self.depth[expanded_idx_mapping.long()]
+ 
+     def observe(

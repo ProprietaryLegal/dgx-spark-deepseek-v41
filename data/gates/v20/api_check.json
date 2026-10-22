@@ -1,0 +1,234 @@
+{
+ "summary": {
+  "serve": "ours_v20",
+  "passed": 14,
+  "total": 14,
+  "hard_failed": [],
+  "soft_failed": []
+ },
+ "checks": [
+  {
+   "check": "models",
+   "pass": true,
+   "hard": true,
+   "http": 200,
+   "body": {
+    "object": "list",
+    "data": [
+     {
+      "id": "dsv41",
+      "object": "model",
+      "created": 1792647579,
+      "owned_by": "vllm",
+      "root": "/home/spark/models/dsv41-v2-release-test",
+      "parent": null,
+      "max_model_len": 262144,
+      "permission": [
+       {
+        "id": "modelperm-902cbd7e3153ed85",
+        "object": "model_permission",
+        "created": 1792647579,
+        "allow_create_engine": false,
+        "allow_sampling": true,
+        "allow_logprobs": true,
+        "allow_search_indices": false,
+        "allow_view": true,
+        "allow_fine_tuning": false,
+        "organization": "*",
+        "group": null,
+        "is_blocking": false
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "check": "non_stream_basic",
+   "pass": true,
+   "hard": true,
+   "content": "Hello there, how are you?",
+   "usage": {
+    "prompt_tokens": 10,
+    "total_tokens": 18,
+    "completion_tokens": 8,
+    "prompt_tokens_details": null,
+    "completion_tokens_details": {
+     "reasoning_tokens": 0
+    }
+   },
+   "error": null
+  },
+  {
+   "check": "stream_usage",
+   "pass": true,
+   "hard": true,
+   "n_chunks": 19,
+   "usage": {
+    "prompt_tokens": 11,
+    "total_tokens": 51,
+    "completion_tokens": 40,
+    "completion_tokens_details": {
+     "reasoning_tokens": 0
+    }
+   },
+   "ttft": 0.20690667512826622,
+   "error": null
+  },
+  {
+   "check": "stop_sequence",
+   "pass": true,
+   "hard": false,
+   "content": "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11",
+   "finish": "stop",
+   "error": null
+  },
+  {
+   "check": "max_tokens",
+   "pass": true,
+   "hard": false,
+   "completion_tokens": 16,
+   "finish": "length",
+   "error": null
+  },
+  {
+   "check": "seed_repeatable",
+   "pass": true,
+   "hard": false,
+   "a": "**Brew & Beyond** — \"Where every cup takes you further.\"",
+   "b": "**Brew & Beyond** — \"Where every cup takes you further.\""
+  },
+  {
+   "check": "thinking_on_parsed",
+   "pass": true,
+   "hard": true,
+   "reasoning_chars": 159,
+   "content": "391",
+   "error": null
+  },
+  {
+   "check": "thinking_off",
+   "pass": true,
+   "hard": false,
+   "reasoning_chars": 0,
+   "content": "391",
+   "error": null
+  },
+  {
+   "check": "tool_single",
+   "pass": true,
+   "hard": true,
+   "tool_calls": [
+    {
+     "id": "chatcmpl-tool-a7376640966b8400",
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "arguments": "{\"city\": \"Bangkok\", \"unit\": \"celsius\"}"
+     }
+    }
+   ],
+   "content": "I'll check that for you.\n\n",
+   "parse_error": null,
+   "error": null
+  },
+  {
+   "check": "tool_round_trip",
+   "pass": true,
+   "hard": true,
+   "content": "Right now in Bangkok it's **31 °C**, with humid conditions and scattered storms. You might want an umbrella if you're heading out.",
+   "error": null
+  },
+  {
+   "check": "tool_parallel",
+   "pass": true,
+   "hard": false,
+   "tool_calls": [
+    {
+     "id": "chatcmpl-tool-b72905f5f8af2464",
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "arguments": "{\"city\": \"Bangkok\", \"unit\": \"celsius\"}"
+     }
+    },
+    {
+     "id": "chatcmpl-tool-941fad9bceae147d",
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "arguments": "{\"city\": \"Tokyo\", \"unit\": \"celsius\"}"
+     }
+    }
+   ],
+   "content": "I'll check the weather for both cities.\n\n",
+   "error": null
+  },
+  {
+   "check": "tool_nested_args",
+   "pass": true,
+   "hard": true,
+   "args": {
+    "title": "GPU budget",
+    "attendees": [
+     {
+      "name": "Ana",
+      "email": "ana@example.com"
+     },
+     {
+      "name": "Ben",
+      "email": "ben@example.com"
+     }
+    ],
+    "time": {
+     "start": "2025-06-11T10:00:00Z",
+     "end": "2025-06-11T10:30:00Z"
+    },
+    "priority": 1,
+    "remind": true
+   },
+   "parse_error": null,
+   "content": "I'll book that for you.\n\n",
+   "error": null
+  },
+  {
+   "check": "tool_streamed",
+   "pass": true,
+   "hard": true,
+   "tool_calls": [
+    {
+     "id": "chatcmpl-tool-8584ed83d7327b9f",
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "arguments": "{\"city\": \"Chiang Mai\", \"unit\": \"fahrenheit\"}"
+     }
+    }
+   ],
+   "parse_error": null,
+   "error": null
+  },
+  {
+   "check": "hermes_shaped",
+   "pass": true,
+   "hard": true,
+   "tool_calls": [
+    {
+     "id": "chatcmpl-tool-aff538f1bc018f6d",
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "arguments": "{\"path\": \"FLOATING_TREE.md\"}"
+     }
+    }
+   ],
+   "reasoning_chars": 0,
+   "content": "I'll read the file first.\n\n",
+   "raw_xml_leak": false,
+   "prompt_tokens": 2593,
+   "wall_s": 2.54,
+   "parse_error": null,
+   "error": null
+  }
+ ]
+}

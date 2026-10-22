@@ -50,7 +50,12 @@ def load(ckpt: str, wmap: dict, name: str) -> torch.Tensor:
         return f.get_tensor(name)
 
 
+OVERRIDE: dict = {}                       # --override: fine-tuned weights replacing the official ones
+
+
 def fp32(ckpt, wmap, base) -> torch.Tensor:
+    if base + ".weight" in OVERRIDE:
+        return OVERRIDE[base + ".weight"].to("cuda").float()
     w = load(ckpt, wmap, base + ".weight")
     if w.dtype == torch.float8_e4m3fn:
         return _dequant_block_fp8(w, load(ckpt, wmap, base + ".scale")).float()
@@ -89,7 +94,14 @@ def main():
     ap.add_argument("--k-map", default="")
     ap.add_argument("--seed", type=int, default=4711)
     ap.add_argument("--no-main-proj", action="store_true", help="leave mtp.0.main_proj FP8 (the shipping composition)")
+    ap.add_argument("--override", default="",
+                    help="a safetensors of fine-tuned drafter weights under the checkpoint's names (fp32): each one "
+                         "found there is encoded instead of the official tensor")
     a = ap.parse_args()
+    if a.override:
+        from safetensors.torch import load_file
+        OVERRIDE.update({k: v for k, v in load_file(a.override).items() if k.endswith(".weight")})
+        print(f"override: {len(OVERRIDE)} weights from {a.override}", flush=True)
     from exllamav3.modules.quant.exl3_lib.quantize import quantize_exl3, quantize_exl3_batch
     kmap = {}
     for kv in filter(None, a.k_map.split(",")):

@@ -1,0 +1,362 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0021 + 0023-0033 (touches nvidia/dspark.py,
+spec_decode/dspark/speculator.py, spec_decode/depth_policy.py, worker/gpu/model_runner.py). Logging only:
+VLLM_DSPARK_CONF_LOG_FEATURES=1 with VLLM_DSPARK_CONF_LOG (patch 0023) adds two features of each draft to the round log,
+"f": [margin_1, p1_1, ..., margin_k, p1_k]: the (top-1 - top-2) logit margin and the top-1 probability of the draft
+logits (base + Markov bias) over the whole vocabulary, from each rank's shard and one more all-gather of [rows, 3]
+(top-1, top-2, logsumexp) a Markov step. The local draft argmax takes its unfused path under the flag (the draft is the
+same token). Why: the depth policy (0010) reads only the confidence head, whose first-position AUC on our panel is 0.83
+on writing and 0.82 on chat against 0.90 on code; a replay of the depth rule with a sharper predictor (AUC ~0.94)
+gives +6% tok/s on those domains (Oct 21). A log under fixed:k says whether these features carry that information.
+VLLM_DSPARK_CONF_LOG_HIDDEN=1 also writes the confidence head's inputs per draft position (the drafter's hidden at the
+sampled position + the Markov embedding of the previous token, 5,376 bf16 values) to <log>.hid, one k x width record a
+logged line ("h": its index), ~54 KB a round: training data for a better acceptance predictor on our own target.
+Test: patches/tests/test_dspark_conf_features.py (serve image).
+
+diff --git a/vllm/models/deepseek_v41/nvidia/dspark.py b/vllm/models/deepseek_v41/nvidia/dspark.py
+index 5ceb838..835a020 100644
+--- a/vllm/models/deepseek_v41/nvidia/dspark.py
++++ b/vllm/models/deepseek_v41/nvidia/dspark.py
+@@ -71,6 +71,21 @@ from .model import (
+ 
+ logger = init_logger(__name__)
+ 
++
++def draft_logit_features(logits: torch.Tensor, gather, tp: int) -> torch.Tensor:
++    """[rows, 2] fp32 (top-1 - top-2 logit margin, top-1 probability) over the whole
++    vocabulary from this rank's shard of the draft logits; `gather` all-gathers a
++    [rows, 3] tensor across the tp ranks along the last dim (rank order)."""
++    lf = logits.float()
++    local = torch.cat(
++        [lf.topk(2, dim=-1).values, torch.logsumexp(lf, -1, keepdim=True)], -1
++    )
++    g = gather(local).view(-1, tp, 3)
++    top = g[:, :, :2].reshape(g.shape[0], -1).topk(2, dim=-1).values
++    lse = torch.logsumexp(g[:, :, 2], dim=-1)
++    return torch.stack([top[:, 0] - top[:, 1], torch.exp(top[:, 0] - lse)], dim=-1)
++
++
+ # VLLM_DSPARK_MARKOV_FUSED=1: the local draft argmax's Markov bias, add and max in
+ # two launches (ops/markov_cache.py argmax_pair), the same drafts bit for bit.
+ _MARKOV_FUSED = os.environ.get("VLLM_DSPARK_MARKOV_FUSED", "0") == "1"
+@@ -552,6 +567,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
+         base_local: torch.Tensor,
+         token_ids: torch.Tensor,
+         markov_embed: torch.Tensor,
++        feat_out: torch.Tensor | None = None,
+     ) -> torch.Tensor:
+         """Greedy draft ids from this rank's shard of base logits + Markov bias: local
+         (max, argmax), then an all-gather of one (value, index) pair per row per rank,
+@@ -560,7 +576,22 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
+         logits returns."""
+         assert self._markov_cache_local is not None
+         lo, hi = self._vocab_shard()
+-        if _MARKOV_FUSED and base_local.stride(-1) == 1:
++        if feat_out is not None:
++            # VLLM_DSPARK_CONF_LOG_FEATURES (logging only): the unfused pair, plus each
++            # row's (top-1 - top-2) logit margin and top-1 probability over the whole
++            # vocabulary into feat_out [rows, 2]; the draft is the same token.
++            bias = self._markov_cache_local(token_ids, markov_embed)
++            logits = base_local[:, : hi - lo] + bias
++            vals, idx = logits.max(dim=-1)
++            pair = torch.stack([vals.float(), (idx + lo).float()], dim=-1)
++            feat_out.copy_(
++                draft_logit_features(
++                    logits,
++                    lambda t: tensor_model_parallel_all_gather(t, dim=-1),
++                    self.lm_head.tp_size,
++                )
++            )
++        elif _MARKOV_FUSED and base_local.stride(-1) == 1:
+             # bias + add + the shard's max in two launches, bit for bit the same pair
+             pair = self._markov_cache_local.argmax_pair(
+                 token_ids, markov_embed, base_local, hi - lo, lo
+diff --git a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runner.py
+index 6d313c3..23d7622 100644
+--- a/vllm/v1/worker/gpu/model_runner.py
++++ b/vllm/v1/worker/gpu/model_runner.py
+@@ -2364,6 +2364,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+                     self.speculator.draft_token_confidence_probs,
+                     input_batch.idx_mapping,
+                     input_batch.num_reqs,
++                    feats=getattr(self.speculator, "draft_feats", None)
++                    if getattr(self.speculator, "_log_feats", False)
++                    else None,
++                    hidden=getattr(self.speculator, "conf_inputs", None)
++                    if getattr(self.speculator, "_log_hidden", False)
++                    else None,
+                 )
+ 
+         if self.num_speculative_steps > 0:
+diff --git a/vllm/v1/worker/gpu/spec_decode/depth_policy.py b/vllm/v1/worker/gpu/spec_decode/depth_policy.py
+index 2e9950f..99cc0ef 100644
+--- a/vllm/v1/worker/gpu/spec_decode/depth_policy.py
++++ b/vllm/v1/worker/gpu/spec_decode/depth_policy.py
+@@ -209,7 +209,18 @@ class DSparkDepthPolicy:
+             self._conf_raw = torch.zeros(
+                 (max_num_reqs, self.k), dtype=torch.float32, device=device
+             )
+-            self._conf_log = _ConfLog(log_path, self.k, max_num_reqs, device)
++            # VLLM_DSPARK_CONF_LOG_FEATURES=1: the drafts' margins and top-1
++            # probabilities ride along, 2 values a position ("f" in each line)
++            self._feats = os.environ.get("VLLM_DSPARK_CONF_LOG_FEATURES", "0") == "1"
++            self._feat_raw = torch.zeros(
++                (max_num_reqs, 2 * self.k), dtype=torch.float32, device=device
++            )
++            # VLLM_DSPARK_CONF_LOG_HIDDEN=1: the confidence head's inputs, kept by slot
++            # like the confidences and written to <log>.hid (bf16, k x width a line)
++            self._hid_raw: torch.Tensor | None = None
++            self._conf_log = _ConfLog(
++                log_path, self.k, max_num_reqs, device, feats=self._feats
++            )
+             self._log_header()
+ 
+     def describe(self) -> str:
+@@ -282,8 +293,11 @@ class DSparkDepthPolicy:
+         confidence_probs: torch.Tensor,
+         idx_mapping: torch.Tensor,
+         num_reqs: int,
++        feats: torch.Tensor | None = None,
++        hidden: torch.Tensor | None = None,
+     ) -> None:
+-        """Choose each request's depth for the drafts just proposed."""
++        """Choose each request's depth for the drafts just proposed. `feats`
++        ([reqs, k, 2], VLLM_DSPARK_CONF_LOG_FEATURES) is only logged."""
+         if num_reqs == 0:
+             return
+         self._maybe_reload()
+@@ -292,6 +306,22 @@ class DSparkDepthPolicy:
+             self._conf_raw.index_copy_(
+                 0, idx_mapping[:num_reqs].long(), confidence_probs[:num_reqs].float()
+             )
++            if self._feats and feats is not None:
++                self._feat_raw.index_copy_(
++                    0,
++                    idx_mapping[:num_reqs].long(),
++                    feats[:num_reqs].reshape(num_reqs, -1).float(),
++                )
++            if hidden is not None:
++                if self._hid_raw is None:
++                    self._hid_raw = torch.zeros(
++                        (self.depth.shape[0],) + tuple(hidden.shape[1:]),
++                        dtype=hidden.dtype,
++                        device=hidden.device,
++                    )
++                self._hid_raw.index_copy_(
++                    0, idx_mapping[:num_reqs].long(), hidden[:num_reqs]
++                )
+         if self.mode == "off":
+             depth = torch.full(
+                 (num_reqs,), self.k, dtype=torch.int32, device=self.depth.device
+@@ -336,11 +366,13 @@ class DSparkDepthPolicy:
+                         self._conf_raw[idx],
+                         self.depth[idx].unsqueeze(1).float(),
+                         num_sampled[:num_reqs].unsqueeze(1).float(),
+-                    ),
++                    )
++                    + ((self._feat_raw[idx],) if self._feats else ()),
+                     dim=1,
+                 ),
+                 list(req_ids[:num_reqs]),
+                 np.array(num_drafts_per_req[:num_reqs], dtype=np.int64),
++                hidden=None if self._hid_raw is None else self._hid_raw[idx],
+             )
+         if self.log_every <= 0:
+             return
+@@ -382,12 +414,30 @@ class _ConfLog:
+     FLUSH_LINES = 256
+     FLUSH_S = 1.0
+ 
+-    def __init__(self, path: str, k: int, max_num_reqs: int, device: torch.device):
++    def __init__(
++        self,
++        path: str,
++        k: int,
++        max_num_reqs: int,
++        device: torch.device,
++        feats: bool = False,
++    ):
+         self.k = k
++        self.feats = feats
++        self.path = path
+         self.file = open(path, "a")
++        # the confidence head's inputs (VLLM_DSPARK_CONF_LOG_HIDDEN): <path>.hid, one
++        # record of k x width bf16 a line in order; "h" in the line is its index
++        self.hid_file = None
++        self.hid_host: torch.Tensor | None = None
++        self.hid_count = 0
++        self.max_num_reqs = max_num_reqs
++        self.cuda = device.type == "cuda"
+         cuda = device.type == "cuda"
+         self.host = torch.empty(
+-            (self.SLOTS, max_num_reqs, k + 2), dtype=torch.float32, pin_memory=cuda
++            (self.SLOTS, max_num_reqs, k + 2 + (2 * k if feats else 0)),
++            dtype=torch.float32,
++            pin_memory=cuda,
+         )
+         self.events = [torch.cuda.Event() if cuda else None for _ in range(self.SLOTS)]
+         self.pending: collections.deque = collections.deque()
+@@ -403,7 +453,13 @@ class _ConfLog:
+         self.lines.append(json.dumps({"hdr": 1, "time": stamp, **fields}))
+         self.flush()
+ 
+-    def add(self, rows: torch.Tensor, req_ids: list[str], drafts: np.ndarray) -> None:
++    def add(
++        self,
++        rows: torch.Tensor,
++        req_ids: list[str],
++        drafts: np.ndarray,
++        hidden: torch.Tensor | None = None,
++    ) -> None:
+         if len(self.pending) == self.SLOTS:
+             # ring full: the oldest copy holds this step's slot
+             event = self.events[self.pending[0][0]]
+@@ -413,6 +469,17 @@ class _ConfLog:
+         slot = self.steps % self.SLOTS
+         event = self.events[slot]
+         self.host[slot, : rows.shape[0]].copy_(rows, non_blocking=event is not None)
++        if hidden is not None:
++            if self.hid_host is None:
++                self.hid_host = torch.empty(
++                    (self.SLOTS, self.max_num_reqs) + tuple(hidden.shape[1:]),
++                    dtype=hidden.dtype,
++                    pin_memory=self.cuda,
++                )
++                self.hid_file = open(self.path + ".hid", "ab")
++            self.hid_host[slot, : hidden.shape[0]].copy_(
++                hidden, non_blocking=event is not None
++            )
+         if event is not None:
+             event.record()
+         self.pending.append((slot, rows.shape[0], self.steps, req_ids, drafts))
+@@ -426,9 +493,19 @@ class _ConfLog:
+             if nd <= 0:
+                 continue  # nothing verified for this request this step
+             c = ",".join(f"{x:.7g}" for x in row[:k])
++            f = ""
++            if self.feats:
++                f = ',"f":[' + ",".join(f"{x:.6g}" for x in row[k + 2 :]) + "]"
++            if self.hid_file is not None:
++                j = req_ids.index(rid)
++                self.hid_file.write(
++                    self.hid_host[slot, j].contiguous().view(torch.int16).numpy().tobytes()
++                )
++                f += f',"h":{self.hid_count}'
++                self.hid_count += 1
+             self.lines.append(
+                 f'{{"q":{json.dumps(rid)},"s":{step},"c":[{c}],'
+-                f'"d":{int(row[k])},"n":{nd},"a":{int(row[k + 1]) - 1}}}'
++                f'"d":{int(row[k])},"n":{nd},"a":{int(row[k + 1]) - 1}{f}}}'
+             )
+ 
+     def drain(self, wait: bool = False) -> None:
+@@ -448,6 +525,8 @@ class _ConfLog:
+         if self.lines:
+             self.file.write("\n".join(self.lines) + "\n")
+             self.file.flush()
++            if self.hid_file is not None:
++                self.hid_file.flush()
+             self.lines.clear()
+         self.flushed_at = time.monotonic()
+ 
+@@ -456,5 +535,7 @@ class _ConfLog:
+             self.drain(wait=True)
+             self.flush()
+             self.file.close()
++            if self.hid_file is not None:
++                self.hid_file.close()
+         except Exception:  # interpreter shutdown: CUDA may already be gone
+             pass
+diff --git a/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py b/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py
+index b0b0561..6657ce7 100644
+--- a/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py
++++ b/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py
+@@ -23,6 +23,7 @@ CUDA graphs (FULL, mirroring DFlash) cover the whole draft step: the parallel
+ backbone forward AND the sequential Markov sampling.
+ """
+ 
++import os
+ from typing import Any
+ 
+ import torch
+@@ -86,6 +87,20 @@ class DSparkSpeculator(DFlashSpeculator):
+         # Greedy drafts reduced per vocabulary shard (VLLM_DSPARK_LOCAL_ARGMAX); set in
+         # load_draft_model once the model has its local bias rows.
+         self._local_argmax: bool = False
++        # VLLM_DSPARK_CONF_LOG_FEATURES=1 (with VLLM_DSPARK_CONF_LOG): per request and
++        # draft position, the draft's logit margin and top-1 probability, for the
++        # depth policy's round log (logging only; set in load_draft_model).
++        self._log_feats: bool = False
++        self.draft_feats = torch.zeros(
++            self.max_num_reqs, self.num_speculative_steps, 2,
++            dtype=torch.float32, device=device,
++        )
++        # VLLM_DSPARK_CONF_LOG_HIDDEN=1 (with VLLM_DSPARK_CONF_LOG): the confidence
++        # head's inputs per request and draft position (the drafter's hidden at the
++        # sampled position and the Markov embedding of the previous token), for a
++        # side file next to the round log (logging only; allocated in load_draft_model).
++        self._log_hidden: bool = False
++        self.conf_inputs: torch.Tensor | None = None
+ 
+     def load_draft_model(
+         self,
+@@ -128,6 +143,27 @@ class DSparkSpeculator(DFlashSpeculator):
+         )
+         if self._local_argmax:
+             logger.info("DSpark: greedy drafts argmax per vocabulary shard (local argmax)")
++        self._log_feats = (
++            self._local_argmax
++            and os.environ.get("VLLM_DSPARK_CONF_LOG_FEATURES", "0") == "1"
++            and bool(os.environ.get("VLLM_DSPARK_CONF_LOG"))
++        )
++        if self._log_feats:
++            logger.info("DSpark: draft margins and top-1 probabilities logged per round")
++        self._log_hidden = (
++            self.use_confidence_head
++            and os.environ.get("VLLM_DSPARK_CONF_LOG_HIDDEN", "0") == "1"
++            and bool(os.environ.get("VLLM_DSPARK_CONF_LOG"))
++        )
++        if self._log_hidden:
++            width = self.draft_model_config.get_hidden_size() + int(
++                getattr(self.draft_model_config.hf_config, "dspark_markov_rank", 0) or 0
++            )
++            self.conf_inputs = torch.zeros(
++                self.max_num_reqs, self.num_speculative_steps, width,
++                dtype=torch.bfloat16, device=self.device,
++            )
++            logger.info("DSpark: the confidence head's inputs (%d a position) logged", width)
+         return model
+ 
+     def _sample_logits(
+@@ -204,7 +240,10 @@ class DSparkSpeculator(DFlashSpeculator):
+                 confidence_markov_embeds.append(markov_embed)
+             if self._local_argmax:
+                 draft_sampled_i = self.model.draft_argmax_local(
+-                    base_logits[:, i], prev, markov_embed
++                    base_logits[:, i],
++                    prev,
++                    markov_embed,
++                    feat_out=self.draft_feats[:num_reqs, i] if self._log_feats else None,
+                 )
+                 self.draft_tokens[:num_reqs, i] = draft_sampled_i
+                 prev = draft_sampled_i
+@@ -221,13 +260,16 @@ class DSparkSpeculator(DFlashSpeculator):
+             prev = draft_sampled_i
+ 
+         if self.use_confidence_head:
+-            confidence = self.model.compute_confidence(
+-                sample_hidden,
+-                torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
+-            )
++            markov_cat = torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1)
++            confidence = self.model.compute_confidence(sample_hidden, markov_cat)
+             self.draft_token_confidence_probs[:num_reqs] = confidence.view(
+                 num_reqs, n_spec
+             )
++            if self._log_hidden and self.conf_inputs is not None:
++                dt = self.conf_inputs.dtype
++                self.conf_inputs[:num_reqs] = torch.cat(
++                    [sample_hidden.to(dt), markov_cat.to(dt)], dim=-1
++                ).view(num_reqs, n_spec, -1)
+ 
+     def _sample_sequential_topk(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
+         """Apply the sequential Markov head only to top-k base-logit candidates.

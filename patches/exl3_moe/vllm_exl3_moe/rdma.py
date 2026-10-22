@@ -15,6 +15,12 @@ EXL3_RDMA_FLAGW=1 (the same on every rank): each part's data write is chained wi
 polls, so no receiving thread is on the path (csrc/exl3_rdma.cu, P2 stage 0; default off until tested on both nodes).
 The setup is collective: the ranks exchange their queue pairs over the group's CPU group on the first eligible
 all-reduce outside a graph capture, and if any rank cannot open RDMA, every rank stays on NCCL.
+EXL3_RDMA_AG=1 (with EXL3_RDMA_AR=1; default off until measured on the serve) also routes vLLM's TP all-gather through
+the ring for small tensors along their last dimension or dim 0 (the decode path's (value, index) pair exchanges of the
+DSpark local argmax and the greedy verify, ~45 us each on NCCL plus vLLM's movedim copy): the same stage kernel, then a
+gather kernel that waits for the peers like the sum and copies each rank's bytes into place, so every rank holds the
+same bits as NCCL's all-gather (any dtype; rows of whole 4-byte words). It shares the ring's slots and sequence with
+the all-reduce: both ranks issue the same collectives in the same order, as with NCCL.
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ logger = init_logger(__name__)
 MAX_BYTES = int(os.environ.get("EXL3_RDMA_AR_MAX_KB") or 256) * 1024
 SLOTS = int(os.environ.get("EXL3_RDMA_AR_SLOTS") or 4)
 FLAGW = os.environ.get("EXL3_RDMA_FLAGW", "0") == "1"
+AG = os.environ.get("EXL3_RDMA_AG", "0") == "1"
 
 _ext = None
 _rings: dict[str, "RdmaAllReduce | None"] = {}      # communicator unique_name -> ring (None: NCCL for good)
@@ -104,6 +111,34 @@ class RdmaAllReduce:
         ext().all_reduce(self.h, x, out)
         return out
 
+    @staticmethod
+    def fits_gather(x: torch.Tensor, dim: int) -> bool:
+        # shape and dtype only, like fits(): the ranks must take the same path for every call
+        if not x.is_cuda or x.dim() == 0 or x.numel() == 0:
+            return False
+        d = dim % x.dim()
+        row = x.element_size() * (x.shape[-1] if d == x.dim() - 1 else x.numel())
+        return (d == 0 or d == x.dim() - 1) and row % 4 == 0 and (x.numel() * x.element_size() + 15) // 16 * 16 <= MAX_BYTES
+
+    def all_gather(self, x: torch.Tensor, dim: int) -> torch.Tensor:
+        """vLLM's all_gather(x, dim) for dim = last or 0 (a 1-D tensor: both), the ranks in rank order."""
+        d = dim % x.dim()
+        x = x.contiguous()
+        nbytes = x.numel() * x.element_size()
+        rows, row4 = (x.numel() // x.shape[-1], x.shape[-1] * x.element_size() // 4) if d == x.dim() - 1 else (1, nbytes // 4)
+        flat = x.reshape(-1).view(torch.uint8)
+        padded = (nbytes + 15) // 16 * 16
+        if padded != nbytes or flat.data_ptr() % 16:
+            src = torch.zeros(padded, dtype=torch.uint8, device=x.device)
+            src[:nbytes].copy_(flat)
+        else:
+            src = flat
+        shape = list(x.shape)
+        shape[d] *= self.world
+        out = torch.empty(shape, dtype=x.dtype, device=x.device)
+        ext().all_gather(self.h, src, out, rows, row4, nbytes)
+        return out
+
 
 def ring_for(comm) -> RdmaAllReduce | None:
     """The ring of a vLLM device communicator (built on its first eligible call), or None (NCCL)."""
@@ -143,3 +178,17 @@ def install() -> None:
     all_reduce._exl3_rdma = True
     CudaCommunicator.all_reduce = all_reduce
     logger.info("EXL3 RDMA all-reduce: vLLM's TP all-reduce routed for bf16 tensors up to %d KB", MAX_BYTES // 1024)
+    if not AG:
+        return
+    orig_ag = CudaCommunicator.all_gather
+
+    def all_gather(self, input_, dim=-1):
+        if RdmaAllReduce.fits_gather(input_, dim):
+            r = ring_for(self)
+            if r is not None:
+                return r.all_gather(input_, dim)
+        return orig_ag(self, input_, dim)
+
+    all_gather._exl3_rdma = True
+    CudaCommunicator.all_gather = all_gather
+    logger.info("EXL3 RDMA all-gather: vLLM's TP all-gather routed for tensors up to %d KB (EXL3_RDMA_AG=1)", MAX_BYTES // 1024)

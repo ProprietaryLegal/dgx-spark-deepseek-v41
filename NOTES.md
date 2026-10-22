@@ -5,48 +5,60 @@ DGX Sparks unless a line says otherwise.
 
 ## Not measured yet
 
+- **The 256K rung on the v2.0 build.** Needles pass 3/3 at 8K-128K; the 255,709-token prompt has not run on it (the
+  launch build passed it at v1.1 with 6.5 GiB at the lowest). It starts with 6 / 6 GiB free after load with vision on,
+  against v1.2's 8 / 9, and had 4 / 4 after the 128K rung: for long prompts serve text-only (the default) and try the
+  opt-in `INDEXER_LOGITS_MB=128`, neither measured at 256K on this build yet.
 - **A long agent soak.** A 2-hour agent run with restarts is the last stability gate.
-- **Image input.** `TEXT_ONLY=0` loads the vision tower. One basic test on the 1017 build (Oct 19): a generated PNG,
-  left half red and right half blue, answered "Red, blue." No image benchmark or broader test yet.
+- **Image input.** `TEXT_ONLY=0` loads the vision tower, and v2.0's numbers were measured with it loaded. One basic
+  test on the 1017 build (Oct 19): a generated PNG, left half red and right half blue, answered "Red, blue." No image
+  benchmark or broader test yet.
 - **Power and efficiency.** Not measured.
-- **The wheel compiles inside `install.sh`.** `install.sh` rebuilt the three images from this repo and copied the
-  serving image to the second Spark; its patch list, vLLM sources and plugin hash the same as the image behind the
-  numbers, and the recipe defaults on it gave set b 102.2 / 58.2 / 141.5 tok/s with greedy output identical to the
-  measured run (24 of 24 oracle continuations). The vLLM and exllamav3 wheels were already built by the same scripts,
-  so that run skipped them; a first install compiles them first.
+- **A from-scratch `install.sh` of v2.0.** The measured image (`dsv41-serve:v5`) is patches 0023-0038 and the plugin
+  layered on v1.1's image. `install.sh` applies the same patch files in order to a fresh wheel: in v5 every patch
+  reverses cleanly in order, each patch's code hunks match this repo's files, and the 42 plugin source files are
+  byte-identical to this repo's except `csrc/NOTICE.tensorfold` (credit lines added after the build). A full
+  `install.sh` run of v2.0 has not been timed or benched; for v1.1 it gave the measured numbers (set b 102.2 / 58.2 /
+  141.5 tok/s, greedy output identical on 24 of 24 oracle prompts).
 
 ## Weaker than the best build we measured
 
-- **1017 build, instruction-reply text:** on the IFEval-reply panel (300 IFEval prompts with native replies) the
-  LibertAIDAI 1017 EXL3 2.9 bpw pack sits closer to native than ours, 0.1135 against 0.1199 KLD, and multilingual is its
-  closer domain on the main panel (0.0571 against 0.0697); ours is closer on the other 7 domains and overall (0.0243
-  against 0.0304). IFEval itself stays within noise of native 1017 (89.09 against 90.39, p = 0.28). No dense or head
-  composition closes the panel gap: 1017b (head K5) reads 0.1188 and 1017r (dense K5, head K6) 0.1147, above theirs on
-  KLD but ahead on top-1 (91.61% against 91.44%), so the gap sits in the experts' encode; a calibration change and a new
-  pass 1 would be the lever.
-- **1017 build, MBPP:** the softest suite, 1-2 points under native 1017 (base 89.68 against 91.53, p = 0.14; plus
-  76.19 against 77.25, p = 0.52), within noise.
-- **Prose decode:** 58.3 tok/s against 62.1 for TensorFold v0.6.0 on the same boxes (9-rep medians, 94%). Prose drafts less well, so
-  a round's fixed cost weighs more; the fixed cost is the lever.
-- **Prefill:** 2,090 / 2,092 tok/s at 8K / 32K since v1.1 (TensorFold's grouped EXL3 prompt kernels for the routed
-  experts; v1: 1,763 / 1,773) against TensorFold v0.6.0's 2,163 / 2,276 on the same boxes (3-rep medians): 1.03-1.09x
-  behind, from 1.23-1.28x. What follows describes v1's gap: Each EXL3 linear in a prompt chunk runs exllamav3's general path (a full weight
-  reconstruct, two Hadamard passes and dtype casts around the GEMM); a path that decodes the trellis once per chunk and
-  folds the rotations into the GEMM (TensorFold's prompt kernels do) is the lever.
-- **Context:** 262,144 tokens a request (the 256K needle rung passes 3/3 with >= 7.5 GiB free on both boxes). A 1M
-  window does not fit with this build: with DSpark on, a boot with a 1M window and a 4.5 GiB KV pool a rank leaves 3 GiB
-  free; with DSpark off, one box ran out of GPU memory during a 512K prefill. TensorFold serves 1M on the same boxes.
-- **Concurrency:** 2 sequences at a time (the 262K context per request takes the memory); 2 streams together give
-  81 tok/s. TensorFold serves 4.
+- **Prose decode:** 57.8 tok/s against TensorFold's 58.2 in the same session (-0.6%). TensorFold's prose rounds are
+  about 2 ms shorter (34.1-34.3 against 36.3 ms) and ours accept more drafts (2.10 against 1.99 tokens a round). The
+  v2.0 build carries more bytes a round than TensorFold's pack for its KLD. The other two sessions read +0.5% (57.8
+  against 57.5) and -0.3% against TensorFold's newest commit: level within the ~1% between boots. v1.2's lighter weights
+  on the v2.0 engine read 61.8-62.0.
+- **Instruction-reply text:** on the IFEval-reply panel HeNryous's 2.75 bpw pack sits a little closer to native,
+  0.0974 against 0.0980 KLD, with top-1 level on both main panels (95.96% against 95.94%). IFEval itself is within noise
+  of native 1017 (90.76 against 90.39).
+- **Multilingual:** LibertAIDAI's 2.9 bpw pack is closer on the multilingual domain of both panels (0.0571 / 0.0637
+  against 0.0585 / 0.0693); v2.0 is closer on the other seven.
+- **Memory after load:** 6 / 6 GiB free with vision on against TensorFold's 12-13 GiB, and v1.2's 8 / 9. Keep other
+  GPU work off both boxes while serving.
+- **Prefill:** 2,055 / 2,061 tok/s at 8K / 32K on v2.0. The launch build since v1.1: 2,090 / 2,092 tok/s against TensorFold
+  v0.6.0's 2,163 / 2,276 on the same boxes (3-rep medians).
+- **Context:** 262,144 tokens a request. A 1M window does not fit: with DSpark on, a boot with a 1M window and a 4.5 GiB
+  KV pool a rank left 3 GiB free on the launch build; with DSpark off, one box ran out of GPU memory during a 512K
+  prefill. TensorFold serves 1M on the same boxes.
+- **Concurrency:** 2 sequences at a time (the 262K context per request takes the memory); 2 streams together gave
+  81 tok/s on the launch build. TensorFold serves 4.
 
 ## Still on the table for speed
 
+- The dense and expert kernels' last ~15% to the read ceiling: `exl3_mrow` streams ~200 GB/s where 230-237 GB/s was
+  measured, and the experts phase ~158 GB/s with the shared expert and the prefetch beside it. Those phases 10% faster
+  would be about 5% on prose.
+- Exact engine items in a prose round (the stage copy in the producers' epilogue, the head strips, the compressor's
+  FP8 linear on the row GEMM, the next round's prep beside the drafter, Markov cache misses): about 0.6 ms a round on
+  paper, less in practice, since programmatic dependent launch already hides most small kernels (FINDINGS 28).
+- More quality per byte: KLD freed by a better encode would let one dense group go back to K4, about 0.38 ms a round
+  each.
 - Per-expert Hessians for the drafter's routed experts (they share one layer-level Hessian today).
-- The 1-row latency floor: a verify round with one live row still costs 28.9 ms.
 
 Measured and left out: the dense `wo_a` at K4 (it is K5). Verify rounds got 0.1-0.3 ms faster, but DSpark acceptance
 fell a point (48.3% against 49.3%) and the panel KLD rose to 0.0250 from 0.0243, so set b got slower on code and prose
-(102.3 / 57.4 / 142.1 against 102.8 / 58.1 / 141.6 in the same session).
+(102.3 / 57.4 / 142.1 against 102.8 / 58.1 / 141.6 in the same session; launch build). The drafter's dense at K4 or K3
+cost prose acceptance (-0.6%).
 
 ## Repo
 

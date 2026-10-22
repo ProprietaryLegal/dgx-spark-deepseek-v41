@@ -196,3 +196,54 @@ def test_grouped_3d_graph_replay_and_checks():
     off = MrowGroup([(t, su, sv, 0, i * N) for i, (t, su, sv) in enumerate(lins[:2])], K)   # both read column 0
     with pytest.raises(RuntimeError):
         off(buf[:2].transpose(0, 1), out[:, :2 * N])
+
+
+@pytest.mark.parametrize("K", [2, 3, 4, 5, 6])
+@pytest.mark.parametrize("want_items", [0, 4096])      # 4096 items forces k-slices: strips read inside an item's run
+@pytest.mark.parametrize("m", [1, 6, 16])
+def test_strips_bit_exact(K, want_items, m):
+    """EXL3_HEAD_STRIPS: the same trellis in strips (to_strips) streams each item's K range as one run; every stage holds
+    the same bytes, so the output is the standard layout's bit for bit, with and without k-splits."""
+    from vllm_exl3_moe.mrow import to_strips
+
+    k, n = 2048, 1024
+    t, su, sv = rand_linear(k, n, K, 100 * K + m + want_items)
+    ref_grp = MrowGroup([(t, su, sv, 0, 0)], K, want_items=want_items)
+    ts = to_strips(t)
+    assert not torch.equal(ts, t)
+    grp = MrowGroup([(ts, su, sv, 0, 0)], K, want_items=want_items, strips=True)
+    assert grp.ks == ref_grp.ks
+    if want_items:
+        assert k // grp.ks[0] > 1, grp.ks
+    x = torch.randn(m, k, device=dev).bfloat16()
+    a = torch.empty(m, n, device=dev, dtype=torch.bfloat16)
+    b = torch.empty(m, n, device=dev, dtype=torch.bfloat16)
+    ref_grp(x, a)
+    for _ in range(2):
+        grp(x, b)
+        assert torch.equal(a, b), (K, want_items, m)
+
+
+def test_strips_graph_replay():
+    from vllm_exl3_moe.mrow import to_strips
+
+    K, k, n, m = 5, 5120, 2048, 6
+    t, su, sv = rand_linear(k, n, K, 77)
+    ref_grp = MrowGroup([(t, su, sv, 0, 0)], K)
+    grp = MrowGroup([(to_strips(t), su, sv, 0, 0)], K, strips=True)
+    x = torch.randn(m, k, device=dev).bfloat16()
+    out = torch.empty(m, n, device=dev, dtype=torch.bfloat16)
+    grp(x, out)
+    g = torch.cuda.CUDAGraph()
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s), torch.cuda.graph(g):
+        grp(x, out)
+    torch.cuda.current_stream().wait_stream(s)
+    ref = torch.empty_like(out)
+    for seed in range(3):
+        x.copy_(torch.randn(m, k, device=dev, generator=torch.Generator(device=dev).manual_seed(seed)).bfloat16())
+        g.replay()
+        ref_grp(x, ref)
+        torch.cuda.synchronize()
+        assert torch.equal(out, ref)

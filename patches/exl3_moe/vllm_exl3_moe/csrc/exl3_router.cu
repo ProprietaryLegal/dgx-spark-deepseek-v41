@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // MoE router at decode sizes: logits = x @ W^T (bf16 x [M, K] with M <= 8, bf16 W [N, K], fp32 logits [M, N]) streamed
 // at DRAM rate, optionally followed in the same launch by DeepSeek-V4's top-k, run by the last block to finish (a
-// grid-wide counter that block resets, so CUDA-graph replays work).
+// grid-wide counter that block resets, so CUDA-graph replays work). The unfused GEMM also serves other decode-size bf16
+// projections cuBLAS runs at a fraction of DRAM rate on sm_12x (rowmm: fp32 or bf16 out), e.g. V4.1's compressor
+// wkv / wgate [1024, 5120] and the indexer's weights_proj [32, 5120] and wk [128, 512].
 //
 // Why: vLLM's GateLinear tiers skip family-120 Blackwell (GB10), which leaves cuBLAS bf16 x bf16 -> fp32 with a split-K
 // reduce, ~30 us + a reduce kernel per layer for the 3.75 MiB [384, 5120] gate (half of DRAM rate), then a top-k kernel.
@@ -25,6 +27,7 @@
 #include <c10/cuda/CUDAGuard.h>
 
 #include <cfloat>
+#include <type_traits>
 #include <climits>
 
 #include "exl3_common.cuh"
@@ -34,7 +37,10 @@ namespace {
 
 constexpr int WARPS = 8;                 // expert rows a block, one warp each
 constexpr int MAXM = 8;                  // rows (decode sizes; x is staged whole in shared memory)
-constexpr int PF = 4;                    // 16-byte row loads in flight a lane
+#ifndef ROUTER_PF
+#define ROUTER_PF 4                     // EXL3_ROUTER_FLAGS="-DROUTER_PF=20": a lane's whole row (K 5120) loaded
+#endif                                   // before griddepcontrol.wait, as TensorFold's router does
+constexpr int PF = ROUTER_PF;            // 16-byte row loads in flight a lane
 constexpr int MAXN = 384;                // experts the fused top-k handles (a multiple of 32)
 constexpr int MAXK = 8;                  // top-k
 
@@ -45,6 +51,10 @@ __device__ __forceinline__ uint4 ld_stream(const uint4* p)
                  : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "l"(p));
     return v;
 }
+
+template <typename T> __device__ __forceinline__ T to_out(float v);
+template <> __device__ __forceinline__ float to_out<float>(float v) { return v; }
+template <> __device__ __forceinline__ __nv_bfloat16 to_out<__nv_bfloat16>(float v) { return __float2bfloat16_rn(v); }
 
 __device__ __forceinline__ float dot8(const uint4& w, const uint4& x)
 {
@@ -74,12 +84,13 @@ struct TopK {
     float* ws;                           // [2, M, N]: scores, then weights
 };
 
-template <int M, bool FUSED>
+template <int M, bool FUSED, typename OT>
 __global__ void __launch_bounds__(WARPS * 32) router_kernel(const __nv_bfloat16* __restrict__ x, int ldx,
                                                             const __nv_bfloat16* __restrict__ w,
-                                                            float* __restrict__ logits, int K, int N,
+                                                            OT* __restrict__ logits, int K, int N,
                                                             const __grid_constant__ TopK t)
 {
+    static_assert(!FUSED || std::is_same<OT, float>::value, "the fused top-k reads fp32 logits");
     extern __shared__ uint4 xs[];        // [M][K / 8]
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int e = blockIdx.x * WARPS + warp;
@@ -133,7 +144,7 @@ __global__ void __launch_bounds__(WARPS * 32) router_kernel(const __nv_bfloat16*
         for (int m = 0; m < M; ++m) {
             if (lane != m) continue;               // lane m writes row m (every lane holds every row's sum)
             const float l = acc[m];
-            logits[(size_t) m * N + e] = l;
+            logits[(size_t) m * N + e] = to_out<OT>(l);
             if constexpr (FUSED) {
                 bool img = false;
                 if (t.bias_vl != nullptr) {
@@ -217,12 +228,12 @@ __global__ void __launch_bounds__(WARPS * 32) router_kernel(const __nv_bfloat16*
     if (threadIdx.x == 0) *t.counter = 0u;
 }
 
-template <int M, bool FUSED>
+template <int M, bool FUSED, typename OT>
 void launch(const at::Tensor& x, const at::Tensor& w, at::Tensor& logits, const TopK& t)
 {
     const int K = (int) x.size(1), N = (int) w.size(0);
     const size_t smem = (size_t) M * K * 2;
-    auto k = router_kernel<M, FUSED>;
+    auto k = router_kernel<M, FUSED, OT>;
     static size_t set = 0;               // per instantiation: raise the dynamic smem cap once (to the largest asked)
     if (smem > 48 * 1024 && smem > set) {
         C10_CUDA_CHECK(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem));
@@ -230,38 +241,44 @@ void launch(const at::Tensor& x, const at::Tensor& w, at::Tensor& logits, const 
     }
     exl3c::launch_k(k, dim3((N + WARPS - 1) / WARPS), dim3(WARPS * 32), smem, c10::cuda::getCurrentCUDAStream(),
                     reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), (int) x.stride(0),
-                    reinterpret_cast<const __nv_bfloat16*>(w.data_ptr()), logits.data_ptr<float>(), K, N, t);
+                    reinterpret_cast<const __nv_bfloat16*>(w.data_ptr()), reinterpret_cast<OT*>(logits.data_ptr()), K, N, t);
 }
 
-template <bool FUSED>
+template <bool FUSED, typename OT = float>
 void dispatch(const at::Tensor& x, const at::Tensor& w, at::Tensor& logits, const TopK& t)
 {
     switch (x.size(0)) {
-        case 1: launch<1, FUSED>(x, w, logits, t); break;
-        case 2: launch<2, FUSED>(x, w, logits, t); break;
-        case 3: launch<3, FUSED>(x, w, logits, t); break;
-        case 4: launch<4, FUSED>(x, w, logits, t); break;
-        case 5: launch<5, FUSED>(x, w, logits, t); break;
-        case 6: launch<6, FUSED>(x, w, logits, t); break;
-        case 7: launch<7, FUSED>(x, w, logits, t); break;
-        case 8: launch<8, FUSED>(x, w, logits, t); break;
+        case 1: launch<1, FUSED, OT>(x, w, logits, t); break;
+        case 2: launch<2, FUSED, OT>(x, w, logits, t); break;
+        case 3: launch<3, FUSED, OT>(x, w, logits, t); break;
+        case 4: launch<4, FUSED, OT>(x, w, logits, t); break;
+        case 5: launch<5, FUSED, OT>(x, w, logits, t); break;
+        case 6: launch<6, FUSED, OT>(x, w, logits, t); break;
+        case 7: launch<7, FUSED, OT>(x, w, logits, t); break;
+        case 8: launch<8, FUSED, OT>(x, w, logits, t); break;
         default: TORCH_CHECK(false, "router: 1..", MAXM, " rows");
     }
 }
 
-void check(const at::Tensor& x, const at::Tensor& w, const at::Tensor& logits)
+void check_xw(const at::Tensor& x, const at::Tensor& w)
 {
-    TORCH_CHECK(x.is_cuda() && w.is_cuda() && logits.is_cuda(), "router: CUDA tensors");
+    TORCH_CHECK(x.is_cuda() && w.is_cuda(), "router: CUDA tensors");
     TORCH_CHECK(x.scalar_type() == at::kBFloat16 && w.scalar_type() == at::kBFloat16, "router: bf16 x and weight");
-    TORCH_CHECK(logits.scalar_type() == at::kFloat && logits.is_contiguous(), "router: contiguous fp32 logits");
     TORCH_CHECK(x.dim() == 2 && w.dim() == 2 && x.size(1) == w.size(1), "router: x [M, K], weight [N, K]");
     TORCH_CHECK(x.size(0) >= 1 && x.size(0) <= MAXM, "router: 1..", MAXM, " rows");
-    TORCH_CHECK(logits.size(0) == x.size(0) && logits.size(1) == w.size(0), "router: logits [M, N]");
     TORCH_CHECK(x.stride(1) == 1 && x.stride(0) % 8 == 0 && w.is_contiguous() && x.size(1) % 8 == 0,
                 "router: K a multiple of 8, rows contiguous, row stride a multiple of 8");
     TORCH_CHECK(reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 == 0 && reinterpret_cast<uintptr_t>(w.data_ptr()) % 16 == 0,
                 "router: 16-byte aligned x and weight");
     TORCH_CHECK((size_t) x.size(0) * x.size(1) * 2 <= 96 * 1024, "router: M * K * 2 bytes must fit shared memory");
+}
+
+void check(const at::Tensor& x, const at::Tensor& w, const at::Tensor& logits)
+{
+    check_xw(x, w);
+    TORCH_CHECK(logits.is_cuda() && logits.scalar_type() == at::kFloat && logits.is_contiguous(),
+                "router: contiguous fp32 logits");
+    TORCH_CHECK(logits.size(0) == x.size(0) && logits.size(1) == w.size(0), "router: logits [M, N]");
 }
 
 }  // namespace
@@ -307,8 +324,23 @@ void router_topk(const at::Tensor& x, const at::Tensor& weight, at::Tensor& logi
     dispatch<true>(x, weight, logits, t);
 }
 
+// out[M, N] = x[M, K] @ weight[N, K]^T with router_logits' fp32 sums, stored in out's dtype: fp32, or bf16 rounded to
+// nearest even (a bf16 F.linear's epilogue rounding; the sums' order is not cuBLAS's).
+void rowmm(const at::Tensor& x, const at::Tensor& weight, at::Tensor& out)
+{
+    check_xw(x, weight);
+    TORCH_CHECK(out.is_cuda() && out.is_contiguous() && out.dim() == 2 && out.size(0) == x.size(0) &&
+                out.size(1) == weight.size(0), "rowmm: contiguous out [M, N]");
+    const c10::cuda::CUDAGuard g(x.device());
+    TopK t{};
+    if (out.scalar_type() == at::kFloat) dispatch<false, float>(x, weight, out, t);
+    else if (out.scalar_type() == at::kBFloat16) dispatch<false, __nv_bfloat16>(x, weight, out, t);
+    else TORCH_CHECK(false, "rowmm: fp32 or bf16 out");
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("router_logits", &router_logits, "MoE router logits at decode sizes (bf16 -> fp32)");
     m.def("router_topk", &router_topk, "router logits + DeepSeek-V4 top-k in one launch");
     m.def("router_max_rows", &router_max_rows, "rows a launch");
+    m.def("rowmm", &rowmm, "x @ W^T at decode sizes (bf16 in, fp32 or bf16 out)");
 }

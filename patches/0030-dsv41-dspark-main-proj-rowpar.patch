@@ -1,0 +1,87 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0021 + 0023-0029 (touches nvidia/dspark.py
+only). VLLM_DSPARK_MAIN_PROJ_ROWPAR=1 (default off): the DSpark drafter's main_proj (the context combiner over the
+three target taps, [5120, 15360], MXFP8 on Marlin) becomes a RowParallelLinear over the concatenated taps instead of a
+ReplicatedLinear. Each rank multiplies its 7680 tap columns by the matching input rows (39 MB a rank instead of 79 MB:
+the Oct 21 prose profile has main_proj at 366-385 us a round, ~210 GB/s) and one all-reduce of the [rows, 5120] partials
+sums them (61 KB at 6 rows, on the RDMA ring), so ~-0.17 ms a round. No loader change: vLLM's RowParallelLinear loaders
+cut the FP8 weight and its [32, 32] ue8m0 block scales on the input dim (7680 = 240 blocks a rank), as for 0028's
+row-parallel Engram wkv. Engages at TP > 1 without sequence parallelism when the split keeps whole 32-column blocks;
+otherwise a warning and the replicated layer. A drafter-only, rounding-class change (each rank's partial is rounded to
+bf16 before the sum): the target's outputs are untouched, so greedy text is identical and only acceptance can move.
+
+diff --git a/vllm/models/deepseek_v41/nvidia/dspark.py b/vllm/models/deepseek_v41/nvidia/dspark.py
+index 207760e..12bfad0 100644
+--- a/vllm/models/deepseek_v41/nvidia/dspark.py
++++ b/vllm/models/deepseek_v41/nvidia/dspark.py
+@@ -35,7 +35,11 @@ from vllm.model_executor.layers.fused_moe import (
+     fused_moe_make_expert_params_mapping,
+ )
+ from vllm.model_executor.layers.layernorm import RMSNorm
+-from vllm.model_executor.layers.linear import ReplicatedLinear, UnquantizedLinearMethod
++from vllm.model_executor.layers.linear import (
++    ReplicatedLinear,
++    RowParallelLinear,
++    UnquantizedLinearMethod,
++)
+ from vllm.model_executor.layers.logits_processor import LogitsProcessor
+ from vllm.model_executor.layers.vocab_parallel_embedding import (
+     ParallelLMHead,
+@@ -109,14 +113,51 @@ class DSparkDeepseekV4Model(nn.Module):
+             prefix=maybe_prefix(prefix, "embed_tokens"),
+         )
+ 
+-        self.main_proj = ReplicatedLinear(
+-            config.hidden_size * len(self.target_layer_ids),
+-            config.hidden_size,
+-            bias=False,
+-            return_bias=False,
+-            quant_config=vllm_config.quant_config,
+-            prefix=maybe_prefix(prefix, "main_proj"),
++        # VLLM_DSPARK_MAIN_PROJ_ROWPAR=1: main_proj row-parallel over the concatenated
++        # target taps. Each rank multiplies its share of the taps by the matching input
++        # rows (half the weight bytes a rank at TP=2) and one all-reduce sums the
++        # partials; replicated otherwise. The split must keep whole 32-column blocks
++        # (the MXFP8 [32, 32] scales) and needs TP > 1 without sequence parallelism.
++        main_in = config.hidden_size * len(self.target_layer_ids)
++        tp_size = get_tensor_model_parallel_world_size()
++        want_rowpar = os.environ.get("VLLM_DSPARK_MAIN_PROJ_ROWPAR", "0") == "1"
++        self.main_proj_rowpar = (
++            want_rowpar
++            and tp_size > 1
++            and not self.use_sequence_parallel
++            and main_in % (32 * tp_size) == 0
+         )
++        if want_rowpar and not self.main_proj_rowpar:
++            logger.warning(
++                "VLLM_DSPARK_MAIN_PROJ_ROWPAR=1 needs TP > 1 without sequence "
++                "parallelism and a 32-column-block input split; main_proj stays "
++                "replicated"
++            )
++        if self.main_proj_rowpar:
++            self.main_proj = RowParallelLinear(
++                main_in,
++                config.hidden_size,
++                bias=False,
++                input_is_parallel=False,
++                reduce_results=True,
++                return_bias=False,
++                quant_config=vllm_config.quant_config,
++                prefix=maybe_prefix(prefix, "main_proj"),
++            )
++            logger.info(
++                "DSpark main_proj row-parallel over %d ranks "
++                "(VLLM_DSPARK_MAIN_PROJ_ROWPAR=1)",
++                tp_size,
++            )
++        else:
++            self.main_proj = ReplicatedLinear(
++                main_in,
++                config.hidden_size,
++                bias=False,
++                return_bias=False,
++                quant_config=vllm_config.quant_config,
++                prefix=maybe_prefix(prefix, "main_proj"),
++            )
+         self.main_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+ 
+         self.topk_indices_buffer = torch.empty(

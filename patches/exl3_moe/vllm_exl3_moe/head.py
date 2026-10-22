@@ -20,6 +20,7 @@ from torch.nn.parameter import Parameter
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import UnquantizedEmbeddingMethod
 
+from . import l2pf
 from .dense import MROW_MAX_ROWS
 from .hostcopy import copy_from_host
 
@@ -65,10 +66,14 @@ class Exl3HeadMethod(UnquantizedEmbeddingMethod):
     """lm_head stored as EXL3 (`exl3_moe.head: "exl3"`, `head_k`; needs patches 0005 + 0007): checkpoint tensors
     head.{trellis,suh,svh,mul1} hold the full [hidden -> vocab] matrix and each rank keeps its vocab range, a column cut
     at whole 128-wide Hadamard blocks (V4.1: 129,280 = 2 x 505 x 128). At K6 it reads 6 bits per weight (MXFP8: 8.25)
-    and stays within ~0.4% of the BF16 head (Hessian-aware encode from the final hidden states, p4_dense.py --head)."""
+    and stays within ~0.4% of the BF16 head (Hessian-aware encode from the final hidden states, p4_dense.py --head).
 
-    def __init__(self, k: int):
+    The DSpark drafter's own head (`exl3_moe.drafter_head_k`, patch 0026 with VLLM_DSPARK_OWN_HEAD=1) is the same
+    method on mtp.head.* pieces, cut the same way, with prefetch=False: l2pf's head prefetch keeps the target's."""
+
+    def __init__(self, k: int, prefetch: bool = True):
         self.k = int(k)
+        self.prefetch = prefetch          # the target's head feeds l2pf's head prefetch; the drafter's own does not
 
     def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int, output_partition_sizes: list[int],
                        input_size: int, output_size: int, params_dtype: torch.dtype, **extra_weight_attrs):
@@ -119,9 +124,19 @@ class Exl3HeadMethod(UnquantizedEmbeddingMethod):
         # module; the head is read by every target forward and every DSpark draft forward.
         layer._mrow = None
         if os.environ.get("VLLM_EXL3_HEAD_MROW", "0") == "1" and 2 <= self.k <= 6 and d % 128 == 0 and n % 128 == 0:
-            from .mrow import MrowGroup
-            layer._mrow = MrowGroup([(layer.trellis.data, layer.suh.data, layer.svh.data, 0, 0)], self.k)
-        logger.info("lm_head: EXL3 K%d (%d x %d per rank)%s", self.k, d, n, ", exl3_mrow at decode" if layer._mrow else "")
+            from .mrow import MrowGroup, to_strips
+            strips = os.environ.get("VLLM_EXL3_HEAD_STRIPS", "0") == "1"
+            if strips:
+                # VLLM_EXL3_HEAD_STRIPS=1: the head's trellis in strips (each 128-column block's K range contiguous: one
+                # run per item instead of a 1.3 KB piece every k-row) for every row count on exl3_mrow; exllamav3's
+                # path, which reads the standard layout, is dropped
+                layer.trellis.data.copy_(to_strips(layer.trellis.data))
+                layer._exl3 = None
+            layer._mrow = MrowGroup([(layer.trellis.data, layer.suh.data, layer.svh.data, 0, 0)], self.k, strips=strips)
+        logger.info("%s: EXL3 K%d (%d x %d per rank)%s", "lm_head" if self.prefetch else "DSpark drafter's own lm_head",
+                    self.k, d, n, ", exl3_mrow at decode" if layer._mrow else "")
+        if self.prefetch:
+            l2pf.register_head([layer.trellis.data])   # first bytes into L2 after the last layer (EXL3_L2PF_HEAD_MB)
 
     def apply(self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         rows = x.numel() // x.shape[-1]
@@ -132,6 +147,13 @@ class Exl3HeadMethod(UnquantizedEmbeddingMethod):
                 x2 = x2.clone()
             y = mrow(x2, torch.empty((rows, layer.exl3_shape[1]), dtype=torch.bfloat16, device=x.device))
             y = y.reshape(*x.shape[:-1], -1)
+            return y if bias is None else y + bias
+        if layer._exl3 is None:          # strips: mrow in chunks of MROW_MAX_ROWS rows
+            x2 = x.reshape(rows, x.shape[-1]).to(torch.bfloat16).contiguous()
+            y = torch.empty((rows, layer.exl3_shape[1]), dtype=torch.bfloat16, device=x.device)
+            for r0 in range(0, rows, MROW_MAX_ROWS):
+                mrow(x2[r0:r0 + MROW_MAX_ROWS].clone(), y[r0:r0 + MROW_MAX_ROWS])
+            y = y.to(x.dtype).reshape(*x.shape[:-1], -1)
             return y if bias is None else y + bias
         xs = x.reshape(-1, x.shape[-1]).to(torch.float16).contiguous()
         y = layer._exl3.forward(xs, {}, out_dtype=torch.float32).to(x.dtype).reshape(*x.shape[:-1], -1)

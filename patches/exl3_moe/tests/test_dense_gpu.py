@@ -166,6 +166,39 @@ def test_wo_a_grouped():
         assert z.shape == (T, G // 2, out_g) and rel(z, ref) < 1e-2
 
 
+@pytest.mark.parametrize("T", [1, 6, 16, 24, 40])
+def test_wo_a_grouped_qdq(monkeypatch, T):
+    """VLLM_DSV41_WOA_QDQ=1 (woa_qdq.py): grouped_bmm(o) == the flag-off grouped_bmm of DeepSeek's FP8 round trip of o,
+    at decode sizes (exl3_mrow's wo_a build folds it into its input load) and prompt sizes (woa_qdq.qdq writes the fp16
+    the exllamav3 path reads), on o_rot as patch 0006 hands it over: the [T, G, D] view of a [G, T, D] buffer."""
+    from vllm_exl3_moe import woa_qdq
+    in_g, out_g, G, k = 512, 256, 8, 5
+    ts = [full_tensors(in_g, out_g, k, 40 + g) for g in range(G)]
+
+    def wo_a(flag):
+        if flag:
+            monkeypatch.setenv("VLLM_DSV41_WOA_QDQ", "1")
+        else:
+            monkeypatch.delenv("VLLM_DSV41_WOA_QDQ", raising=False)
+        m = Exl3DenseLinearMethod("attn.wo_a", k)
+        layer = fake_layer(ColumnParallelLinear, 0)
+        with torch.device(dev):
+            m.create_weights(layer, in_g, [G * out_g // 2], in_g, G * out_g, torch.bfloat16, weight_loader=None)
+        params = dict(layer.named_parameters())
+        for g in range(G):
+            for n in ("trellis", "suh", "svh", "mul1"):
+                p = params[f"slice.{g}.{n}"]
+                assert p.weight_loader(p, ts[g][n])
+        m.process_weights_after_loading(layer)
+        return layer
+
+    on, off = wo_a(True), wo_a(False)
+    o = (torch.randn(G // 2, T, in_g, device=dev) * 3).bfloat16().transpose(0, 1)
+    z = on.grouped_bmm(o)
+    assert torch.equal(z.view(torch.int16), off.grouped_bmm(woa_qdq.qdq(o)).view(torch.int16)), T
+    assert not torch.equal(z.view(torch.int16), off.grouped_bmm(o).view(torch.int16))
+
+
 @pytest.mark.parametrize("k", [5, 6])
 def test_fused_wqa_wkv_replicated(k):
     """fused_wqa_wkv: replicated (disable_tp), two shards of unequal width (wq_a + wkv; 1280 + 512 in the model)."""
@@ -181,6 +214,40 @@ def test_fused_wqa_wkv_replicated(k):
     ref = torch.cat([torch.nn.functional.linear(x.float(), Wq), torch.nn.functional.linear(x.float(), Wkv)], -1)
     print(f"fused_wqa_wkv K{k}: rel {rel(y, ref):.2e}")
     assert y.shape == (T, sum(outs)) and rel(y, ref) < 1e-2
+
+
+def test_context_kv_group():
+    """context_kv_group: the wkv part of three fused wq_a + wkv modules (DSpark's draft layers) in one launch on one
+    input, each module's columns equal to that module's own wkv output (F.linear with its reconstructed matrix), run to
+    run identical; None for a module without flat parts or a different K."""
+    from vllm_exl3_moe.dense import context_kv_group
+    in_f, outs, T, k = 1024, [384, 128], 6, 5
+    layers, refs = [], []
+    x = torch.randn(T, in_f, device=dev, dtype=torch.bfloat16)
+    for j in range(3):
+        tq, tkv = full_tensors(in_f, outs[0], k, 40 + 2 * j), full_tensors(in_f, outs[1], k, 41 + 2 * j)
+        m = Exl3DenseLinearMethod("attn.fused_wqa_wkv", k, layer_idx=40 + j, prefetch=False)
+        loads = [(n, tq[n], 0) for n in ("trellis", "suh", "svh", "mul1")] + \
+                [(n, tkv[n], 1) for n in ("trellis", "suh", "svh", "mul1")]
+        layers.append(build(m, fake_layer(MergedColumnParallelLinear, 0, tp_size=1), in_f, outs, in_f, sum(outs), loads))
+        refs.append(torch.nn.functional.linear(x.float(), dense_weight(tkv, in_f, outs[1])))
+    run, widths = context_kv_group(layers)
+    assert widths == [outs[1]] * 3
+    y = run(x)
+    assert y.shape == (T, 3 * outs[1])
+    for j in range(3):
+        r = rel(y[:, j * outs[1]:(j + 1) * outs[1]], refs[j])
+        print(f"context kv group, module {j}: rel {r:.2e}")
+        assert r < 1e-2
+    assert torch.equal(y, run(x)), "not deterministic"
+    assert context_kv_group(layers)[0] is run                          # cached on the first module
+    m6 = Exl3DenseLinearMethod("attn.fused_wqa_wkv", 6, layer_idx=43, prefetch=False)
+    t6q, t6kv = full_tensors(in_f, outs[0], 6, 50), full_tensors(in_f, outs[1], 6, 51)
+    l6 = build(m6, fake_layer(MergedColumnParallelLinear, 0, tp_size=1), in_f, outs, in_f, sum(outs),
+               [(n, t6q[n], 0) for n in ("trellis", "suh", "svh", "mul1")] +
+               [(n, t6kv[n], 1) for n in ("trellis", "suh", "svh", "mul1")])
+    assert context_kv_group([layers[1], l6]) is None                   # K differ
+    assert context_kv_group([fake_layer(MergedColumnParallelLinear, 0, tp_size=1)]) is None
 
 
 def test_unequal_shards_need_replicated():

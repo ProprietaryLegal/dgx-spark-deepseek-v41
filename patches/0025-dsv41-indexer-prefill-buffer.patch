@@ -1,0 +1,76 @@
+After HeNryous's patch 0033b (github.com/HeNryous/deepseek-v41-1017-dgx-spark, patches/0033b-dsv41-indexer-buffer.patch
+at cef176c, Apache-2.0: "indexer prefill buffer factor 8 instead of 40"), our rework; against vLLM main 6e517b15 +
+patches 0001-0024 (0001 touches the same file, other lines).
+The sparse indexer's prefill gather buffer at 8 x max_model_len rows instead of 40 x
+(VLLM_INDEXER_PREFILL_BUFFER_FACTOR: default 8, 40 = upstream, under 2 refused at startup). In the profile run every
+index layer reserves factor x max_model_len / compress_ratio rows of 132 B (128 fp8 + an fp32 scale) in the target's
+lane of the shared workspace, which keeps its largest size for the server's life. V4.1's index layers 20-36 have
+compress ratio 1 (one row a token), so at MAX_LEN 262144 the lane held 10,485,760 rows, 1,321 MiB with the 1 MiB top-k
+scratch; at 8 it holds 2,097,152 rows, 265 MiB: 1,056 MiB (1.03 GiB) less per rank (from the code, not measured;
+HeNryous's -0.32 GiB a rank at 320K equals (40 - 8) x 327,680 x 132 B / 4, V4's ratio-4 layout, not V4.1's). Nothing
+else in that lane is larger on GB10: FlashInfer's sparse MLA keeps its own 128 MiB buffer, the routed experts run in the
+plugin, and the DSpark drafter (lane 1) has no index layer.
+Overflow: the chunker (_split_indexer_prefill_chunks) packs a step's prefills while their rows fit the buffer and takes
+a single longer request whole, which would gather past its end; one request is at most max_model_len rows, so no factor
+of 2 or more gets there. At our settings (MAX_SEQS 2) a step gathers at most 2 x 262,144 = 524,288 of 2,097,152 rows, so
+the chunks are the ones factor 40 makes and results do not change; with more seats, a step the buffer would overflow is
+split by request, each chunk inside it. MAX_BATCH (the 2,048-token prefill chunk) bounds query rows, which only the
+logits cap (VLLM_SPARSE_INDEXER_MAX_LOGITS_MB) splits. VLLM_DEBUG_WORKSPACE=1 logs the lane's size: 265.00 MB, upstream
+1321.00 MB. Test: patches/tests/test_dsv41_memory_caps.py (CPU; vLLM's own chunker when vLLM imports, a copy of it
+otherwise).
+
+diff --git a/vllm/v1/attention/backends/mla/indexer.py b/vllm/v1/attention/backends/mla/indexer.py
+index f3b07a6a0..94b887ef5 100644
+--- a/vllm/v1/attention/backends/mla/indexer.py
++++ b/vllm/v1/attention/backends/mla/indexer.py
+@@ -821,6 +821,30 @@ class KpoolTailMetadataBuilder(AttentionMetadataBuilder):
+         )
+ 
+ 
++def _indexer_prefill_buffer_factor() -> int:
++    """dsv41 patch 0025: the prefill gather buffer in units of max_model_len.
++
++    VLLM_INDEXER_PREFILL_BUFFER_FACTOR, default 8 (upstream: 40). The chunker
++    (_split_indexer_prefill_chunks) packs a step's prefills into chunks whose
++    gathered rows fit the buffer but takes a longer single request whole, so the
++    buffer must hold one request (max_model_len rows plus its draft tokens):
++    factors under 2 are refused.
++    """
++    import os
++
++    raw = os.environ.get("VLLM_INDEXER_PREFILL_BUFFER_FACTOR") or "8"
++    try:
++        factor = int(raw)
++    except ValueError:
++        factor = 0
++    if factor < 2:
++        raise ValueError(
++            f"VLLM_INDEXER_PREFILL_BUFFER_FACTOR={raw!r}: want an integer >= 2 "
++            "(dsv41 default 8, upstream 40)"
++        )
++    return factor
++
++
+ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
+     max_model_len = vllm_config.model_config.max_model_len
+     # NOTE(Chen): 40 is a magic number for controlling the prefill buffer size.
+@@ -831,7 +855,18 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
+     # within the flashmla_sparse workspace.
+     # For DeepSeek-V3.2, the max_model_len is 163840.
+     #   40 * 163840 * 132 = 865075200 bytes = 825 MB
+-    return max_model_len * 40
++    # dsv41 patch 0025: 8 by default. V4.1's index layers 20-36 keep one row a
++    # token (compress ratio 1), so at max_model_len 262,144 the buffer held
++    # 40 x 262,144 x 132 B = 1.29 GiB of workspace for the server's life; 8 x is
++    # 0.26 GiB, the keys of 8 full-length requests, more than one chunk takes
++    # before the logits cap (VLLM_SPARSE_INDEXER_MAX_LOGITS_MB) splits it.
++    factor = _indexer_prefill_buffer_factor()
++    logger.info_once(
++        "Sparse indexer prefill buffer: %d x max_model_len rows (patch 0025; "
++        "VLLM_INDEXER_PREFILL_BUFFER_FACTOR=40 is upstream's)",
++        factor,
++    )
++    return max_model_len * factor
+ 
+ 
+ def _supports_varlen_paged_mqa_logits() -> bool:

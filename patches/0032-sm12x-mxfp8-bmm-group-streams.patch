@@ -1,0 +1,91 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0021 + 0023-0031 (touches
+model_executor/kernels/linear/mxfp8/sm12x_bmm.py, patch 0004's file, only). VLLM_SM12X_BMM_STREAMS=1 (default off):
+sm12x_marlin_bmm runs its groups' Marlin MXFP8 GEMMs concurrently at decode sizes (<= 16 tokens): group 0 on the
+calling stream, the others on side streams forked from it and joined before the output stack. On GB10 the DSpark
+drafter's FP8 wo_a (4 groups a rank at TP=2, [1024, 4096] each, 4.2 MB) ran as four ~25 us GEMMs in a row with a copy
+between each, ~108 us a drafter layer, 0.32 ms a round (Oct 21 prose trace): each fills only a few SMs. The same
+kernel on the same inputs per group, so the output is bit-identical; the floor is DRAM (16.8 MB a layer, ~67 us).
+Larger batches and one-group calls keep the loop. Test: patches/tests/test_sm12x_bmm_streams.py (serve image, GPU:
+bit-equal to the loop at 1-16 tokens, eager and in a captured graph).
+
+diff --git a/vllm/model_executor/kernels/linear/mxfp8/sm12x_bmm.py b/vllm/model_executor/kernels/linear/mxfp8/sm12x_bmm.py
+index b234902..a7c1657 100644
+--- a/vllm/model_executor/kernels/linear/mxfp8/sm12x_bmm.py
++++ b/vllm/model_executor/kernels/linear/mxfp8/sm12x_bmm.py
+@@ -7,8 +7,16 @@ dequantizes the weight to BF16 once at load and runs a BF16 bmm: twice the bytes
+ is slow on GB10 (137 us per 1024 x 4096 group at m=1, measured). This kernel keeps the FP8 weight and runs one Marlin
+ MXFP8 (W8A16) GEMM per group, 26 us per group at m=1 on GB10 (the CUTLASS MXFP8 GEMM is 151 us there).
+ deep_gemm_fp8_o_proj routes to it when wo_a carries `sm12x_bmm_groups`.
++
++VLLM_SM12X_BMM_STREAMS=1 (default off): at decode sizes (<= 16 tokens) the groups' GEMMs
++run concurrently, one per stream (the calling stream and groups - 1 side streams it
++forks and joins), instead of one after another: a group's Marlin GEMM at a few rows
++fills only a few SMs (~25 us for its 4.2 MB on GB10), so four in a row leave DRAM
++mostly idle. The same kernel on the same inputs per group: the output is bit-identical.
+ """
+ 
++import os
++
+ import torch
+ from torch.nn.parameter import Parameter
+ 
+@@ -93,6 +101,48 @@ class Sm12xMarlinMxfp8BmmLinearKernel(Mxfp8LinearKernel):
+         return out
+ 
+ 
++_STREAMS = os.environ.get("VLLM_SM12X_BMM_STREAMS", "0") == "1"
++_STREAMS_MAX_TOKENS = 16
++_side_streams: dict[int, list[torch.cuda.Stream]] = {}
++
++
++def _streams(device: torch.device, count: int) -> list[torch.cuda.Stream]:
++    i = device.index if device.index is not None else torch.cuda.current_device()
++    have = _side_streams.setdefault(i, [])
++    while len(have) < count:
++        have.append(torch.cuda.Stream(device=device))
++    return have[:count]
++
++
++def _sm12x_marlin_bmm_streams(x, weight, scales, groups, n, k, apply):
++    """The groups' GEMMs concurrently: group 0 on the calling stream, the others on
++    side streams that wait for the calling stream's work so far and that the calling
++    stream waits for before the stack (a fork / join a CUDA graph captures too)."""
++    cur = torch.cuda.current_stream()
++    side = _streams(x.device, groups - 1)
++    outs: list[torch.Tensor | None] = [None] * groups
++    for s in side:
++        s.wait_stream(cur)
++    for i in range(groups):
++        s = cur if i == 0 else side[i - 1]
++        with torch.cuda.stream(s):
++            outs[i] = apply(
++                input=x[:, i, :].contiguous(),
++                weight=weight[i],
++                weight_scale=scales[i],
++                workspace=None,
++                size_n=n,
++                size_k=k,
++            )
++    for s in side:
++        cur.wait_stream(s)
++    # No record_stream: the side streams are this function's own, and each call first
++    # makes them wait for the calling stream, so a side-stream reuse of these outputs'
++    # blocks is ordered after the stack below (vLLM's multi-stream helpers rely on
++    # the same ordering).
++    return torch.stack(outs, dim=1)
++
++
+ def sm12x_marlin_bmm(
+     x: torch.Tensor, weight: torch.Tensor, scales: torch.Tensor, groups: int, n: int, k: int
+ ) -> torch.Tensor:
+@@ -102,6 +152,10 @@ def sm12x_marlin_bmm(
+ 
+     tokens, g, _ = x.shape
+     assert g == groups, (g, groups)
++    if _STREAMS and 1 < groups and tokens <= _STREAMS_MAX_TOKENS and x.is_cuda:
++        return _sm12x_marlin_bmm_streams(
++            x, weight, scales, groups, n, k, apply_mxfp8_marlin_linear
++        )
+     out = torch.empty((tokens, groups, n), dtype=x.dtype, device=x.device)
+     for i in range(groups):
+         out[:, i, :] = apply_mxfp8_marlin_linear(

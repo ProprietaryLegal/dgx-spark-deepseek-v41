@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Prompt chunks' routed experts through TensorFold's grouped EXL3 kernels (VLLM_EXL3_MOE_TF_PROMPT=1, default off).
 
-Why: an 8K prefill (session 10's trace, Oct 12) spent ~1.9 s of rank 0's 4.5 s in the routed experts plus most of
+Why: an 8K prefill (an Oct 12 trace) spent ~1.9 s of rank 0's 4.5 s in the routed experts plus most of
 ~0.7 s of casts and copies around them: every expert over the fused tier's row limit ran exllamav3's general path (a
 gather, three full fp16 reconstructs, six Hadamard passes, three cuBLAS GEMMs with fp32 outputs, SwiGLU as five torch
 ops). TensorFold's prompt path (tf_experts.py, csrc/tf_experts/: Apache-2.0, see csrc/NOTICE.tensorfold) groups the

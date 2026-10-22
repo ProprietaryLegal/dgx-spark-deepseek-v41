@@ -58,7 +58,7 @@ declare -A LEVER=(
   [dx3]=""            # no env: the drafter's routed experts on EXL3 K3 come from the model dir (...-dx3, p4_drafter_experts_variant.py)
   [dx4]=""            # the same at K4
   [pcores]="EXL3_CPU_PIN=5-9,15-19"   # every vLLM process on GB10's Cortex-X925 cores (plugin __init__, measured Oct 11)
-  [woa4]=""           # no env: the dense wo_a at K4 comes from the model dir (...-v3c-dk5-h4-dx3, session 9)
+  [woa4]=""           # no env: the dense wo_a at K4 comes from the model dir (...-v3c-dk5-h4-dx3)
 )
 cstate() {   # $1: 1 = disable LPI-2 / LPI-3 on every core of both Sparks, 0 = enable them again
   for h in spark spark2; do

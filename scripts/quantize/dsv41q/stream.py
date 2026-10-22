@@ -34,6 +34,7 @@ class SeqState:
 class Streamer:
     def __init__(self, ckpt_dir: str, seqs: list[list[int]], device="cuda", max_seq_len: int | None = None):
         self.ckpt = Checkpoint(ckpt_dir)
+        self.tap_hook = None                           # (layer, state, h) before a layer's attention, after engram
         self.model, self.kernel, _ = load_reference(ckpt_dir)
         # GB10: CUDA memory is system memory; a runaway allocation must fail in this process, not hang the box
         torch.cuda.set_per_process_memory_fraction(float(os.environ.get("DSV41_CUDA_MEM_FRACTION", "0.70")))
@@ -124,6 +125,8 @@ class Streamer:
             h = st.h
             if blk.engram is not None:
                 h = blk.engram(h, st.hashes[:, :, blk.engram.layer_hash_index, :], None)
+            if self.tap_hook is not None:              # the DSpark drafter's input: the stream's hc mean entering a layer
+                self.tap_hook(self.layer, st, h)
             residual = h
             attn_pre, attn_post, attn_comb = blk.hc_mixes(h, blk.hc_attn_fn, blk.hc_attn_scale, blk.hc_attn_base)
             x = blk.attn_norm(blk.hc_pre(h, st.pre_mix))

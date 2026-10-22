@@ -1,0 +1,331 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0021.
+Calibrated confidences for the DSpark verify depth (patch 0010), and a per-round log to fit them from; both off by
+default. The DSpark paper (arXiv 2607.05147, section 3.2.1) calibrates its confidence head per position with
+temperature scaling before the scheduler forms prefix survivals (its raw head: ECE 3-8%, ~1% calibrated); DeepSeek's
+checkpoint ships no temperatures, so 0010 reads the raw scores.
+VLLM_DSPARK_CONF_TEMPS="t1,...,tk" (one value covers every position, a short list repeats its last value) and
+VLLM_DSPARK_CONF_BIAS="b1,...,bk" (default 0): the conf rule reads sigmoid(logit(c_i) / t_i + b_i) in place of c_i.
+The head is one fp32 Linear(hidden + Markov rank -> 1) and vLLM keeps sigmoid of its logit
+(draft_token_confidence_probs, fp32), so the policy takes torch.logit of that (clamped 1e-6 from 0 and 1) outside the
+captured draft graph: the temperature on the head's logit, to fp32 rounding. Only the depth moves, and rows up to any
+depth compute what the full window computes for them (0010), so greedy text does not change.
+VLLM_DSPARK_CONF_LOG=<path.jsonl> (+ VLLM_DSPARK_CONF_LOG_TAG, a run tag for the header): rank 0 appends a header line
+(k, policy, cost table, temperatures) at start and whenever VLLM_DSPARK_DEPTH_FILE changes the policy or the table,
+then one line per request per verify round: request id, step, the raw confidences (before any temperature), the depth
+that round used, the drafts in the window and the drafts accepted. Confidences are kept by request slot when drafted
+and joined with the acceptance after the next verify; each step's rows take one async copy into a pinned 8-slot ring
+and are written once their event has completed, so a step waits on the GPU only if all 8 slots are still in flight
+(~0.1 ms of host time a step with the log on). The logged id contains the client's X-Request-Id, so a tag there names
+the domain. Fit from a log taken under VLLM_DSPARK_DEPTH_POLICY=fixed:<k>: every position is then verified whenever
+its prefix survives, with no selection by the scores being fitted. Test: patches/tests/test_dspark_conf_calibration.py.
+
+diff --git a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runner.py
+index 033165d..76f8e3b 100644
+--- a/vllm/v1/worker/gpu/model_runner.py
++++ b/vllm/v1/worker/gpu/model_runner.py
+@@ -2191,6 +2191,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+                 num_sampled,
+                 input_batch.num_draft_tokens_per_req,
+                 input_batch.num_reqs,
++                req_ids=input_batch.req_ids,
+             )
+ 
+         if self.pp_handler is not None:
+diff --git a/vllm/v1/worker/gpu/spec_decode/depth_policy.py b/vllm/v1/worker/gpu/spec_decode/depth_policy.py
+index 22aaab2..2e9950f 100644
+--- a/vllm/v1/worker/gpu/spec_decode/depth_policy.py
++++ b/vllm/v1/worker/gpu/spec_decode/depth_policy.py
+@@ -30,9 +30,26 @@ Environment:
+                             ms by depth 0..k, drafter included)
+   VLLM_DSPARK_DEPTH_LOG     N > 0: every N verify steps, log the chosen depths and
+                             the drafts verified / accepted
++  VLLM_DSPARK_CONF_TEMPS    "t1,...,tk": per-position temperatures for the
++                            confidence head; the conf rule reads
++                            sigmoid(logit(c_i) / t_i + b_i) instead of c_i (one
++                            value covers every position, a short list repeats its
++                            last value); unset = the raw confidences
++  VLLM_DSPARK_CONF_BIAS     "b1,...,bk": per-position bias added after the
++                            temperature (default 0)
++  VLLM_DSPARK_CONF_LOG      a .jsonl path: rank 0 appends a header line (k, policy,
++                            cost table, temperatures) and then one line per request
++                            per verify round: the raw confidences (before any
++                            temperature), the depth chosen, the drafts in the
++                            window and the drafts accepted
++  VLLM_DSPARK_CONF_LOG_TAG  a run tag (e.g. the domain) for the header line
+ """
+ 
++import atexit
++import collections
++import json
+ import os
++import time
+ 
+ import numpy as np
+ import torch
+@@ -46,6 +63,9 @@ logger = init_logger(__name__)
+ _DEFAULT_ROUND_MS = (38.0, 41.0, 44.0, 46.5, 48.5, 50.5)
+ _DEFAULT_DRAFT_MS = 4.5
+ _FILE_EVERY = 64
++# torch.logit clamp for VLLM_DSPARK_CONF_TEMPS: fp32 confidences within 1e-6 of 0 or 1
++# read as logit -/+13.8
++_CONF_EPS = 1e-6
+ 
+ 
+ def _parse_policy(text: str | None) -> tuple[str, int]:
+@@ -85,6 +105,34 @@ def round_cost_ms(num_steps: int) -> list[float]:
+     return [rows[d] + draft_ms for d in range(num_steps + 1)]
+ 
+ 
++def _per_position(name: str, k: int) -> list[float] | None:
++    """A per-position list from a comma-separated env value: one value covers every
++    position, a short list repeats its last value; unset or empty = None."""
++    text = os.environ.get(name) or ""
++    vals = [float(x) for x in text.split(",") if x.strip()]
++    if not vals:
++        return None
++    if len(vals) > k:
++        raise ValueError(f"{name}={text!r}: {len(vals)} values for {k} draft positions")
++    return vals + [vals[-1]] * (k - len(vals))
++
++
++def calibrate(
++    confidence_probs: torch.Tensor, inv_temp: torch.Tensor, bias: torch.Tensor
++) -> torch.Tensor:
++    """[n, k] confidences -> sigmoid(logit(c) * inv_temp + bias), per position. The
++    head stores sigmoid(its logit) in fp32, so this is a temperature on that logit,
++    to fp32 rounding."""
++    z = torch.logit(confidence_probs.float(), eps=_CONF_EPS)
++    return torch.sigmoid(torch.addcmul(bias, z, inv_temp))
++
++
++def _is_rank0() -> bool:
++    import torch.distributed as dist
++
++    return not dist.is_initialized() or dist.get_rank() == 0
++
++
+ def choose_depth(confidence_probs: torch.Tensor, cost_ms: torch.Tensor) -> torch.Tensor:
+     """[n, k] per-position acceptance probabilities -> [n] int32 depths in 0..k."""
+     conf = confidence_probs.float().clamp(0.0, 1.0)
+@@ -133,10 +181,51 @@ class DSparkDepthPolicy:
+             self.k,
+             [round(c, 2) for c in cost],
+         )
++        # Confidence calibration (VLLM_DSPARK_CONF_TEMPS / _BIAS): only the conf
++        # rule reads it, only the depth moves.
++        self._temps = _per_position("VLLM_DSPARK_CONF_TEMPS", self.k)
++        self._bias = _per_position("VLLM_DSPARK_CONF_BIAS", self.k)
++        self.inv_temp: torch.Tensor | None = None
++        self.bias: torch.Tensor | None = None
++        if self._temps is not None or self._bias is not None:
++            self._temps = self._temps or [1.0] * self.k
++            self._bias = self._bias or [0.0] * self.k
++            if min(self._temps) <= 0:
++                raise ValueError(f"VLLM_DSPARK_CONF_TEMPS={self._temps}: must be > 0")
++            self.inv_temp = torch.tensor(
++                [1.0 / t for t in self._temps], dtype=torch.float32, device=device
++            )
++            self.bias = torch.tensor(self._bias, dtype=torch.float32, device=device)
++            logger.info(
++                "DSpark confidence temperatures %s, bias %s", self._temps, self._bias
++            )
++        # VLLM_DSPARK_CONF_LOG: raw confidences by request slot, kept from the draft
++        # until its verify round is observed.
++        self._conf_log: _ConfLog | None = None
++        log_path = os.environ.get("VLLM_DSPARK_CONF_LOG") or None
++        if log_path and not has_confidence:
++            logger.warning("VLLM_DSPARK_CONF_LOG ignored: no confidence head")
++        elif log_path and _is_rank0():
++            self._conf_raw = torch.zeros(
++                (max_num_reqs, self.k), dtype=torch.float32, device=device
++            )
++            self._conf_log = _ConfLog(log_path, self.k, max_num_reqs, device)
++            self._log_header()
+ 
+     def describe(self) -> str:
+         return f"fixed:{self.fixed}" if self.mode == "fixed" else self.mode
+ 
++    def _log_header(self) -> None:
++        if self._conf_log is not None:
++            self._conf_log.header(
++                k=self.k,
++                policy=self.describe(),
++                cost_ms=[round(c, 4) for c in self.cost_ms.tolist()],
++                temps=self._temps,
++                bias=self._bias,
++                tag=os.environ.get("VLLM_DSPARK_CONF_LOG_TAG") or None,
++            )
++
+     def reset(self, req_index: int) -> None:
+         self.depth[req_index] = self.k
+ 
+@@ -171,6 +260,7 @@ class DSparkDepthPolicy:
+         if mode == "conf" and not self._has_conf:
+             logger.warning("DSpark depth file %s: no confidence head", self.file)
+             return
++        changed = False
+         table = _parse_table(text)
+         if table:
+             while len(table) < self.k + 1:
+@@ -178,10 +268,14 @@ class DSparkDepthPolicy:
+             new = torch.tensor(table[: self.k + 1], dtype=torch.float32, device=self.cost_ms.device)
+             if not torch.equal(new, self.cost_ms):
+                 self.cost_ms.copy_(new)
++                changed = True
+                 logger.info("DSpark depth cost table -> %s", [round(c, 2) for c in table[: self.k + 1]])
+         if (mode, fixed) != (self.mode, self.fixed):
+             self.mode, self.fixed = mode, fixed
++            changed = True
+             logger.info("DSpark depth policy -> %s", self.describe())
++        if changed:
++            self._log_header()
+ 
+     def record(
+         self,
+@@ -194,6 +288,10 @@ class DSparkDepthPolicy:
+             return
+         self._maybe_reload()
+         self.num_records += 1
++        if self._conf_log is not None:
++            self._conf_raw.index_copy_(
++                0, idx_mapping[:num_reqs].long(), confidence_probs[:num_reqs].float()
++            )
+         if self.mode == "off":
+             depth = torch.full(
+                 (num_reqs,), self.k, dtype=torch.int32, device=self.depth.device
+@@ -206,7 +304,10 @@ class DSparkDepthPolicy:
+                 device=self.depth.device,
+             )
+         else:
+-            depth = choose_depth(confidence_probs[:num_reqs], self.cost_ms)
++            conf = confidence_probs[:num_reqs]
++            if self.inv_temp is not None:
++                conf = calibrate(conf, self.inv_temp, self.bias)
++            depth = choose_depth(conf, self.cost_ms)
+         self.depth.index_copy_(0, idx_mapping[:num_reqs].long(), depth)
+ 
+     def dead_rows(
+@@ -221,9 +322,27 @@ class DSparkDepthPolicy:
+         num_sampled: torch.Tensor,
+         num_drafts_per_req: np.ndarray | None,
+         num_reqs: int,
++        req_ids: list[str] | None = None,
+     ) -> None:
+-        """Count drafts verified and accepted; log every VLLM_DSPARK_DEPTH_LOG steps."""
+-        if self.log_every <= 0 or num_reqs == 0 or num_drafts_per_req is None:
++        """Count drafts verified and accepted; log every VLLM_DSPARK_DEPTH_LOG steps.
++        With VLLM_DSPARK_CONF_LOG, queue this verify round's lines (rank 0)."""
++        if num_reqs == 0 or num_drafts_per_req is None:
++            return
++        if self._conf_log is not None and req_ids is not None:
++            idx = idx_mapping[:num_reqs].long()
++            self._conf_log.add(
++                torch.cat(
++                    (
++                        self._conf_raw[idx],
++                        self.depth[idx].unsqueeze(1).float(),
++                        num_sampled[:num_reqs].unsqueeze(1).float(),
++                    ),
++                    dim=1,
++                ),
++                list(req_ids[:num_reqs]),
++                np.array(num_drafts_per_req[:num_reqs], dtype=np.int64),
++            )
++        if self.log_every <= 0:
+             return
+         depth = self.depth[idx_mapping[:num_reqs].long()].long()
+         drafts = torch.from_numpy(
+@@ -249,3 +368,93 @@ class DSparkDepthPolicy:
+             self._hist.zero_()
+             self._live.zero_()
+             self._kept.zero_()
++
++
++class _ConfLog:
++    """VLLM_DSPARK_CONF_LOG writer (rank 0). A verify step's rows (raw confidences,
++    depth, tokens sampled) go to a pinned host ring with one async copy and an event;
++    their lines are formatted once the event has completed and written in batches,
++    so a step waits on the GPU only if all 8 slots still have copies in flight.
++    Lines reach the file within about a second; the last step before the serve goes
++    idle is written at the next step or at exit."""
++
++    SLOTS = 8
++    FLUSH_LINES = 256
++    FLUSH_S = 1.0
++
++    def __init__(self, path: str, k: int, max_num_reqs: int, device: torch.device):
++        self.k = k
++        self.file = open(path, "a")
++        cuda = device.type == "cuda"
++        self.host = torch.empty(
++            (self.SLOTS, max_num_reqs, k + 2), dtype=torch.float32, pin_memory=cuda
++        )
++        self.events = [torch.cuda.Event() if cuda else None for _ in range(self.SLOTS)]
++        self.pending: collections.deque = collections.deque()
++        self.lines: list[str] = []
++        self.steps = 0
++        self.flushed_at = time.monotonic()
++        atexit.register(self.close)
++        logger.info("DSpark confidence log -> %s", path)
++
++    def header(self, **fields) -> None:
++        self.drain(wait=True)  # earlier rounds keep their place before the header
++        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
++        self.lines.append(json.dumps({"hdr": 1, "time": stamp, **fields}))
++        self.flush()
++
++    def add(self, rows: torch.Tensor, req_ids: list[str], drafts: np.ndarray) -> None:
++        if len(self.pending) == self.SLOTS:
++            # ring full: the oldest copy holds this step's slot
++            event = self.events[self.pending[0][0]]
++            if event is not None:
++                event.synchronize()
++            self._pop()
++        slot = self.steps % self.SLOTS
++        event = self.events[slot]
++        self.host[slot, : rows.shape[0]].copy_(rows, non_blocking=event is not None)
++        if event is not None:
++            event.record()
++        self.pending.append((slot, rows.shape[0], self.steps, req_ids, drafts))
++        self.steps += 1
++        self.drain()
++
++    def _pop(self) -> None:
++        slot, n, step, req_ids, drafts = self.pending.popleft()
++        k = self.k
++        for rid, nd, row in zip(req_ids, drafts.tolist(), self.host[slot, :n].tolist()):
++            if nd <= 0:
++                continue  # nothing verified for this request this step
++            c = ",".join(f"{x:.7g}" for x in row[:k])
++            self.lines.append(
++                f'{{"q":{json.dumps(rid)},"s":{step},"c":[{c}],'
++                f'"d":{int(row[k])},"n":{nd},"a":{int(row[k + 1]) - 1}}}'
++            )
++
++    def drain(self, wait: bool = False) -> None:
++        while self.pending:
++            event = self.events[self.pending[0][0]]
++            if event is not None and not event.query():
++                if not wait:
++                    break
++                event.synchronize()
++            self._pop()
++        if len(self.lines) >= self.FLUSH_LINES or (
++            self.lines and time.monotonic() - self.flushed_at >= self.FLUSH_S
++        ):
++            self.flush()
++
++    def flush(self) -> None:
++        if self.lines:
++            self.file.write("\n".join(self.lines) + "\n")
++            self.file.flush()
++            self.lines.clear()
++        self.flushed_at = time.monotonic()
++
++    def close(self) -> None:
++        try:
++            self.drain(wait=True)
++            self.flush()
++            self.file.close()
++        except Exception:  # interpreter shutdown: CUDA may already be gone
++            pass

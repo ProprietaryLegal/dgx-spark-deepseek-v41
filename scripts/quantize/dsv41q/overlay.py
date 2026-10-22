@@ -87,6 +87,8 @@ def overlay_block(blk: torch.nn.Module, layer: int, tensors: dict[str, torch.Ten
         k_in, n_out = _dims(t)
         assert (mod.in_features, mod.out_features) == (k_in, n_out), (path, (mod.in_features, mod.out_features), (k_in, n_out))
         _set_weight(mod, reconstruct(t, k_in, n_out))
+        # p4_kld.py --act-qdq-scope inputs: the modules that read the normalized residual stream
+        mod.weight._act_qdq_input = path in ("attn.wq_a", "attn.wkv", "ffn.shared_experts.w1", "ffn.shared_experts.w3")
         done.append(path)
     return done
 
@@ -95,7 +97,10 @@ def _set_weight(mod: torch.nn.Module, w16: torch.Tensor) -> None:
     """Dense weight in the module's float dtype (bf16 where the checkpoint had FP8: the reference's linear() then runs
     F.linear, as for its other unquantized linears)."""
     dt = mod.weight.dtype if mod.weight.dtype in (torch.float32, torch.bfloat16, torch.float16) else torch.bfloat16
+    was_quantized = dt != mod.weight.dtype
     mod.weight = torch.nn.Parameter(w16.to(dt).contiguous(), requires_grad=False)
+    # the reference's linear() quantized this module's activations (p4_kld.py --act-qdq keeps doing that)
+    mod.weight._act_qdq = was_quantized
     if getattr(mod, "scale", None) is not None:
         mod.scale = None
 

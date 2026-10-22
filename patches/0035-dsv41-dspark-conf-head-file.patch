@@ -1,0 +1,107 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0021 + 0023-0034 (touches
+spec_decode/dspark/speculator.py only). VLLM_DSPARK_CONF_HEAD=<head.npz> (default unset): the DSpark speculator reads
+its per-position draft confidences from a head fitted to this target's own acceptance (fitted offline,
+from a fixed:k round log with patch 0034's confidence inputs) instead of the checkpoint's one Linear(5,376 -> 1): per
+draft position i, sigmoid(x . w[i] + b[i]) over the same x = [the drafter's hidden at the sampled position, the Markov
+embedding of the previous token] in fp32, plus, with w1 / b1 / w2 / b2 in the file, a residual MLP
+w2[i] . gelu(w1[i] x + b1[i]) + b2[i]. Only the verify depth (patch 0010's conf rule) reads the confidences, and rows
+up to any depth compute what the full window computes for them, so greedy text does not change; the drafts do not move
+either. Why: on our panel the checkpoint's head separates accepted from rejected drafts at AUC 0.83 / 0.82 on writing /
+chat (0.90 on code), and a replay of the depth rule with a sharper predictor is worth up to +6% on those domains
+(Oct 21). Test: patches/tests/test_dspark_conf_head.py (serve image).
+
+diff --git a/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py b/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py
+index 6657ce7..18cf46e 100644
+--- a/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py
++++ b/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py
+@@ -39,6 +39,27 @@ from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
+ logger = init_logger(__name__)
+ 
+ 
++def conf_head_override(
++    head: dict[str, torch.Tensor],
++    hidden: torch.Tensor,
++    markov_embed: torch.Tensor,
++    num_reqs: int,
++    n_spec: int,
++) -> torch.Tensor:
++    """VLLM_DSPARK_CONF_HEAD: per draft position i, sigmoid(x . w[i] + b[i]) over x =
++    [hidden, Markov embedding] in fp32 as the checkpoint's head reads it, plus, with
++    w1 [k, H, D] / b1 [k, H] / w2 [k, H] (/ b2 [k]), a residual MLP
++    w2[i] . gelu(w1[i] x + b1[i]); returns [num_reqs * n_spec] probabilities."""
++    x = torch.cat([hidden, markov_embed], dim=-1).float().view(num_reqs, n_spec, -1)
++    z = (x * head["w"][None, :n_spec]).sum(-1) + head["b"][None, :n_spec]
++    if "w1" in head:
++        u = torch.einsum("rpd,phd->rph", x, head["w1"][:n_spec]) + head["b1"][None, :n_spec]
++        z = z + (torch.nn.functional.gelu(u) * head["w2"][None, :n_spec]).sum(-1)
++        if "b2" in head:
++            z = z + head["b2"][None, :n_spec]
++    return torch.sigmoid(z).flatten()
++
++
+ class DSparkSpeculator(DFlashSpeculator):
+     _speculator_name = "DSpark"
+ 
+@@ -101,6 +122,10 @@ class DSparkSpeculator(DFlashSpeculator):
+         # side file next to the round log (logging only; allocated in load_draft_model).
+         self._log_hidden: bool = False
+         self.conf_inputs: torch.Tensor | None = None
++        # VLLM_DSPARK_CONF_HEAD=<.npz>: a confidence head fitted to this target's own
++        # acceptance (fitted offline from patch 0034's round logs), per draft position, over the
++        # same inputs as the checkpoint's head; loaded in load_draft_model.
++        self._conf_head: dict[str, torch.Tensor] | None = None
+ 
+     def load_draft_model(
+         self,
+@@ -155,6 +180,21 @@ class DSparkSpeculator(DFlashSpeculator):
+             and os.environ.get("VLLM_DSPARK_CONF_LOG_HIDDEN", "0") == "1"
+             and bool(os.environ.get("VLLM_DSPARK_CONF_LOG"))
+         )
++        path = os.environ.get("VLLM_DSPARK_CONF_HEAD")
++        if path and self.use_confidence_head:
++            import numpy as np
++
++            z = np.load(path)
++            head = {key: torch.tensor(z[key], dtype=torch.float32, device=self.device)
++                    for key in z.files}
++            k = self.num_speculative_steps
++            if head["w"].shape[0] < k or ("w1" in head) != ("w2" in head):
++                raise ValueError(f"VLLM_DSPARK_CONF_HEAD={path}: needs w [>= {k}, D] (+ w1, b1, w2)")
++            self._conf_head = head
++            logger.info(
++                "DSpark confidence head from %s (%s)", path,
++                "linear + MLP" if "w1" in head else "linear",
++            )
+         if self._log_hidden:
+             width = self.draft_model_config.get_hidden_size() + int(
+                 getattr(self.draft_model_config.hf_config, "dspark_markov_rank", 0) or 0
+@@ -261,7 +301,12 @@ class DSparkSpeculator(DFlashSpeculator):
+ 
+         if self.use_confidence_head:
+             markov_cat = torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1)
+-            confidence = self.model.compute_confidence(sample_hidden, markov_cat)
++            if self._conf_head is not None:
++                confidence = self._confidence_override(
++                    sample_hidden, markov_cat, num_reqs, n_spec
++                )
++            else:
++                confidence = self.model.compute_confidence(sample_hidden, markov_cat)
+             self.draft_token_confidence_probs[:num_reqs] = confidence.view(
+                 num_reqs, n_spec
+             )
+@@ -271,6 +316,15 @@ class DSparkSpeculator(DFlashSpeculator):
+                     [sample_hidden.to(dt), markov_cat.to(dt)], dim=-1
+                 ).view(num_reqs, n_spec, -1)
+ 
++    def _confidence_override(
++        self,
++        hidden: torch.Tensor,
++        markov_embed: torch.Tensor,
++        num_reqs: int,
++        n_spec: int,
++    ) -> torch.Tensor:
++        return conf_head_override(self._conf_head, hidden, markov_embed, num_reqs, n_spec)
++
+     def _sample_sequential_topk(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
+         """Apply the sequential Markov head only to top-k base-logit candidates.
+ 

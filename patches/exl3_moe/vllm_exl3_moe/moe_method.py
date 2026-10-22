@@ -48,10 +48,17 @@ _PROJ_INDEX = {PROJ_GATE: 0, PROJ_DOWN: 1, PROJ_UP: 2}
 _SMOE_SHARED = K.env_int("VLLM_EXL3_MOE_SMOE_SHARED", 0)
 # VLLM_EXL3_MOE_FUSED=1 (default 0 until measured on the serve; needs patch 0016): decode steps of <= 8 tokens run the
 # whole MoE phase (router GEMV, top-k, routed experts, shared expert) as one exl3_smoe launch (smoe.py fused), called
-# from DeepseekV4MoE before vLLM's runner, which then does not run (Program P stage P2).
+# from DeepseekV4MoE before vLLM's runner, which then does not run.
 _SMOE_FUSED = K.env_int("VLLM_EXL3_MOE_FUSED", 0)
+# VLLM_EXL3_MOE_ROUTE_FUSED=1 (default 0 until measured on the serve; needs patch 0016): decode steps of <= 8 tokens
+# route with one exl3_router launch (router GEMV + DeepSeek-V4's top-k, router_topk) in place of the gate GEMV and vLLM's
+# top-k kernel, then run the routed experts on exl3_smoe and the shared expert on vLLM's aux stream as the runner does:
+# one launch less a MoE layer, the same experts and weights as router_topk picks (bit-identical ids; tests/
+# test_route_fused_vllm.py). VLLM_EXL3_MOE_FUSED, when also on, takes precedence.
+_ROUTE_FUSED = K.env_int("VLLM_EXL3_MOE_ROUTE_FUSED", 0)
+_ROUTE_SCRATCH: dict[tuple, dict[str, torch.Tensor]] = {}
 # below this many tokens the runner path stays (GB10, the fused launch vs router_topk + smoe: 0.98x at 1 token, 1.02-1.03x
-# at 4-6; LOG Oct 11 03:23)
+# at 4-6)
 _SMOE_FUSED_MIN_ROWS = K.env_int("VLLM_EXL3_MOE_FUSED_MIN_ROWS", 2)
 _KINDS = ("trellis", "suh", "svh")
 
@@ -320,17 +327,20 @@ class Exl3RoutedMoEMethod(FusedMoEMethodBase):
         TP-reduced as vLLM's runner would; None when the step or the layer does not qualify (the runner runs as usual).
         `moe`: the DeepseekV4MoE module (gate, shared_experts, routed_scaling_factor, reduce_results). Patch 0016 calls
         it at the top of DeepseekV4MoE._forward_fused_moe."""
-        if not _SMOE_FUSED or self.smoe is None or self.settings.decode_kernel != "coop":
+        if not (_SMOE_FUSED or _ROUTE_FUSED) or self.smoe is None or self.settings.decode_kernel != "coop":
             return None
         x = hidden_states
         gate = getattr(moe, "gate", None)
-        if gate is None or x.dim() != 2 or x.dtype != torch.bfloat16 or x.shape[0] < _SMOE_FUSED_MIN_ROWS:
+        min_rows = _SMOE_FUSED_MIN_ROWS if _SMOE_FUSED else 1
+        if gate is None or x.dim() != 2 or x.dtype != torch.bfloat16 or x.shape[0] < min_rows:
             return None
         w = gate.weight
         if (not self.smoe.fused_ok(x.shape[0], w.shape[0]) or w.dtype != torch.bfloat16 or w.dim() != 2
                 or getattr(gate, "tid2eid", None) is not None or not getattr(gate, "is_unquantized", True)
                 or getattr(moe, "use_sequence_parallel", False)):
             return None
+        if not _SMOE_FUSED:
+            return self._route_fused_forward(moe, x, w, input_ids)
         if getattr(self, "_fused_state", None) is None:
             self._fused_state = self._fused_setup(moe)
         if not self._fused_state:
@@ -347,6 +357,59 @@ class Exl3RoutedMoEMethod(FusedMoEMethodBase):
         out, _, _ = self.smoe.fused(x, w, bias if bias is not None else gate.e_score_correction_bias.data, self.perm,
                                     self.act_limit, float(moe.routed_scaling_factor), _padding_rows(m), shared,
                                     None if bvl is None else bvl.data, tok, sent)
+        l2pf.point("next", self.layer_idx, m)
+        if getattr(moe, "reduce_results", True) and self.tp_size > 1:
+            from vllm.distributed import tensor_model_parallel_all_reduce
+            out = tensor_model_parallel_all_reduce(out)
+        return out
+
+    def _route_fused_forward(self, moe, x: torch.Tensor, w: torch.Tensor, input_ids: torch.Tensor | None):
+        """VLLM_EXL3_MOE_ROUTE_FUSED: router_topk (one launch), the shared expert on vLLM's aux stream forked before it
+        (as the runner overlaps it), the routed experts on exl3_smoe, their sum TP-reduced; None when the layer does
+        not qualify (the runner runs)."""
+        gate = moe.gate
+        bias = getattr(gate, "e_score_correction_bias", None)
+        if bias is None or bias.dtype != torch.float32 or not bias.is_contiguous() or bias.numel() != w.shape[0]:
+            return None
+        bias = bias.data if hasattr(bias, "data") else bias
+        bvl, sent, tok = getattr(gate, "bias_vl", None), int(getattr(moe, "image_sentinel_lo", 0) or 0), None
+        if bvl is not None and sent:
+            if input_ids is None:
+                return None
+            tok = input_ids if input_ids.dtype == torch.int64 else input_ids.to(torch.int64)
+        else:
+            bvl, sent = None, 0
+        from .router import ext as router_ext
+        m, n, k = x.shape[0], w.shape[0], self.smoe.top_k
+        key = (str(x.device), n, k)
+        sc = _ROUTE_SCRATCH.get(key)
+        if sc is None:
+            sc = _ROUTE_SCRATCH[key] = {
+                "logits": torch.empty(8, n, dtype=torch.float32, device=x.device),
+                "ws": torch.empty(2 * 8 * n, dtype=torch.float32, device=x.device),
+                "w": torch.zeros(8, k, dtype=torch.float32, device=x.device),
+                "ids": torch.zeros(8, k, dtype=torch.int32, device=x.device),
+                "counter": torch.zeros(1, dtype=torch.int32, device=x.device),
+                "f32": torch.empty(0, dtype=torch.float32, device=x.device),
+                "i64": torch.empty(0, dtype=torch.int64, device=x.device)}
+            logger.info_once("EXL3 routed experts: router + top-k in one exl3_router launch (VLLM_EXL3_MOE_ROUTE_FUSED=1)")
+        if x.stride(-1) != 1 or x.data_ptr() % 16 or x.stride(0) % 8:
+            x = x.contiguous().clone()
+        cur = torch.cuda.current_stream()
+        shared = getattr(moe, "shared_experts", None)
+        so, side = None, None
+        if shared is not None:
+            side = aux_stream()
+            side.wait_stream(cur)
+            with torch.cuda.stream(side):
+                so = shared(x)
+        router_ext().router_topk(x, w, sc["logits"][:m], bias, sc["f32"] if bvl is None else bvl.data,
+                                 sc["i64"] if tok is None else tok, int(sent), float(moe.routed_scaling_factor),
+                                 sc["w"][:m], sc["ids"][:m], sc["counter"], sc["ws"])
+        out = self.smoe(x, sc["ids"][:m], sc["w"][:m], self.perm, self.act_limit, _padding_rows(m))
+        if so is not None:
+            cur.wait_stream(side)
+            out = out + so
         l2pf.point("next", self.layer_idx, m)
         if getattr(moe, "reduce_results", True) and self.tp_size > 1:
             from vllm.distributed import tensor_model_parallel_all_reduce

@@ -26,7 +26,7 @@ def full_head(dim, vocab, k, seed=0):
 
 
 @pytest.mark.parametrize("mrow", ["0", "1"])
-@pytest.mark.parametrize("k", [5, 6])
+@pytest.mark.parametrize("k", [3, 4, 5, 6])          # 3 / 4: the DSpark drafter's own head (exl3_moe.drafter_head_k)
 def test_vocab_parallel_head(k, mrow, monkeypatch):
     monkeypatch.setenv("VLLM_EXL3_HEAD_MROW", mrow)            # 1: decode sizes through exl3_mrow
     dim, vocab, T = 1024, 2560, 6

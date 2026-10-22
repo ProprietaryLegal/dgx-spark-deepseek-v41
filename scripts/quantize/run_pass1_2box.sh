@@ -2,7 +2,8 @@
 # Pass 1 on both Sparks: each encodes a strided half of every layer's experts (--part i/2) and they swap partial MoE
 # outputs per layer through exchange_sync.sh (host side, ConnectX link). Run from the control machine (or either Spark).
 #   PLAN=~/dsv41_recipe/plans/plan.json ./run_pass1_2box.sh [first_layer-last_layer]
-# Partial re-encode (only experts whose K changed; the rest from an assembled checkpoint), own run dir and token set:
+# Partial re-encode (only experts whose K changed; the rest from an assembled checkpoint, or the first of a comma list
+# REUSE=a,b OLD_PLAN=pa,pb that holds them at their new K), own run dir and token set:
 #   PLAN=.../plan_v3.json OLD_PLAN=.../plan_v2_270.json REUSE=/home/spark/models/dsv41-recipe-exl3-v2.1 \
 #   RUN=/home/spark/dsv41_recipe/runs/p1_v3 CALF=cal_v3.safetensors ./run_pass1_2box.sh
 # Domain-weighted Hessians: P1_EXTRA="--index /cal/cal_v3_index.json --domain-weights code=1,chat=1,..." (any extra
@@ -21,17 +22,13 @@ CALF=${CALF:-cal.safetensors}
 REUSE=${REUSE:-}
 OLD_PLAN=${OLD_PLAN:-}
 P1_EXTRA=${P1_EXTRA:-}
-if [ -n "$REUSE" ]; then
-  [ -n "$OLD_PLAN" ] && [ "$(dirname "$OLD_PLAN")" = "$(dirname "$PLAN")" ] || { echo "REUSE needs OLD_PLAN next to PLAN"; exit 1; }
-  RMOUNT="-v $REUSE:/reuse:ro"; RARGS="--reuse /reuse --old-plan /plan/$(basename "$OLD_PLAN")"
-else
-  RMOUNT=""; RARGS=""
-fi
+. "$(dirname "$0")/reuse_args.sh"   # REUSE / OLD_PLAN: one path or comma lists (several checkpoints)
+reuse_args || exit 1
 MODEL=${OFFICIAL:-/home/spark/models/DeepSeek-V4.1-Flash-official-2cba9e42}   # OFFICIAL= the official checkpoint dir
 IMAGE=${IMAGE:-dsv41-quant:dev}   # any image with exllamav3 + the harness deps; must be the same image ID on both
 sh_() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$1" "$2"; }
-ha=$(sh_ "$A" "sha256sum $PLAN $OLD_PLAN $CAL/$CALF $REUSE/model.safetensors.index.json 2>&1 | cut -c1-16 | tr '\n' ' '")
-hb=$(sh_ "$B" "sha256sum $PLAN $OLD_PLAN $CAL/$CALF $REUSE/model.safetensors.index.json 2>&1 | cut -c1-16 | tr '\n' ' '")
+ha=$(sh_ "$A" "sha256sum $PLAN $CAL/$CALF $REUSE_HASH_FILES 2>&1 | cut -c1-16 | tr '\n' ' '")
+hb=$(sh_ "$B" "sha256sum $PLAN $CAL/$CALF $REUSE_HASH_FILES 2>&1 | cut -c1-16 | tr '\n' ' '")
 [ "$ha" = "$hb" ] || { echo "plan / calibration differ between boxes: $ha vs $hb"; exit 1; }
 echo "plan + calibration identical on both: $ha"
 ia=$(sh_ "$A" "docker image inspect -f {{.Id}} $IMAGE"); ib=$(sh_ "$B" "docker image inspect -f {{.Id}} $IMAGE")

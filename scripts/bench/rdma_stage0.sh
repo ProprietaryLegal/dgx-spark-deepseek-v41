@@ -3,8 +3,10 @@
 # the RDMA ring's flag-write mode off and on, plus STRESS all-reduces with every result checked (the ordering check
 # for NIC-written flags). Run from the control machine with no serve up; prints rank 0's lines. Each run has a timeout.
 #   IMAGE=dsv41-serve:v4 STRESS=1000000 scripts/bench/rdma_stage0.sh
+# The plugin comes from the mounted patches (PYTHONPATH), not the image's copy. AG=1 checks the ring's all-gather too
+# (EXL3_RDMA_AG). WIDE=1 MAXKB=1024 adds Engram row-parallel's [6 | 12, 25600] all-reduce (patch 0028) at that ring size.
 set -uo pipefail
-IMAGE=${IMAGE:-dsv41-serve:v4}; STRESS=${STRESS:-1000000}; GID=${GID:-3}; TMO=${TMO:-900}
+IMAGE=${IMAGE:-dsv41-serve:v4}; STRESS=${STRESS:-1000000}; GID=${GID:-3}; TMO=${TMO:-900}; WIDE=${WIDE:-0}; MAXKB=${MAXKB:-256}; AG=${AG:-0}
 MASTER=${MASTER:-$(ssh -o BatchMode=yes spark "ip -4 -o addr show enp1s0f0np0 | awk '{print \$4}' | cut -d/ -f1")}   # rank 0's ConnectX address
 [ -n "$MASTER" ] || { echo "spark: no IPv4 on enp1s0f0np0"; exit 1; }
 run() {   # $1 flag-write mode, $2 stress count
@@ -14,9 +16,9 @@ run() {   # $1 flag-write mode, $2 stress count
     ssh -o BatchMode=yes $h "timeout -k 30 $TMO docker run --rm --gpus all --network host --ipc host --device /dev/infiniband \
       --ulimit memlock=-1 -e RANK=$r -e MASTER_ADDR=$MASTER -e MASTER_PORT=$port -e NCCL_IB_HCA=rocep1s0f0 \
       -e NCCL_IB_GID_INDEX=$GID -e NCCL_SOCKET_IFNAME=enp1s0f0np0 -e GLOO_SOCKET_IFNAME=enp1s0f0np0 \
-      -e EXL3_RDMA_AR=1 -e EXL3_RDMA_FLAGW=$1 -e STRESS=$2 \
+      -e EXL3_RDMA_AR=1 -e EXL3_RDMA_FLAGW=$1 -e STRESS=$2 -e WIDE=$WIDE -e EXL3_RDMA_AR_MAX_KB=$MAXKB -e AG=$AG -e EXL3_RDMA_AG=$AG -e PYTHONPATH=/opt/p/exl3_moe \
       -v ~/dsv41_recipe/patches:/opt/p:ro -v ~/.cache/dsv41-serve:/root/.cache --entrypoint python3 $IMAGE \
-      /opt/p/exl3_moe/tests/rdma_ar_2node.py 2>&1 | grep -v -i -E 'warn|nccl info' | tail -14" > /tmp/stage0_$1_$r.log 2>&1 &
+      /opt/p/exl3_moe/tests/rdma_ar_2node.py 2>&1 | grep -v -i -E 'warn|nccl info' | tail -24" > /tmp/stage0_$1_$r.log 2>&1 &
   done
   wait
   echo "== flag-write $1, stress $2"

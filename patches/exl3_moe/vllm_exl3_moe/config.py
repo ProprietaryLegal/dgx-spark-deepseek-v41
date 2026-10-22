@@ -40,6 +40,9 @@ _ROUTED_LAYER_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.ffn\.experts(?:\.|$)")
 
 
 _ENGRAM_WKV = re.compile(r"layers\.(\d+)\.engram\.wkv$")   # V4.1 Engram layers 1 and 14 (exl3_moe.dense.engram.wkv: K)
+# The DSpark drafter's own lm_head: patch 0026 builds it under this prefix (dspark.py OWN_HEAD_PREFIX) with
+# VLLM_DSPARK_OWN_HEAD=1 and loads the checkpoint's mtp.head.* pieces into it
+DRAFTER_HEAD_PREFIX = "mtp_head"
 
 @dataclass
 class Exl3Settings:
@@ -54,24 +57,30 @@ class Exl3Settings:
     head: str = "bf16"                              # bf16 (checkpoint) | mxfp8 (Marlin, needs patch 0005)
                                                     # | exl3 (EXL3 tensors head.*, needs 0005 + 0007)
     head_k: int | None = None                       # K of the EXL3 head
+    drafter_head_k: int | None = None               # K of the DSpark drafter's own EXL3 head (mtp.head.* tensors,
+    #   scripts/quantize/p4_drafter_head_variant.py; needs patch 0026): with VLLM_DSPARK_OWN_HEAD=1 the drafter projects
+    #   with it instead of sharing the target's head, which keeps head / head_k (e.g. a K4 drafter head under a K6 one)
     dense: dict[str, Any] | None = None             # EXL3 dense linears (dense.py, needs patch 0006):
     #   {"k": {"attn.wq_a": 5, "attn.wq_b": 5, "attn.wo_a": 5, "attn.wo_b": 5, "ffn.shared_experts.w1": 5,
     #          "ffn.shared_experts.w2": 5}, "layers": [first, last]}
+    #   "k_layers": {"attn.wo_b": {"30": 4, ...}}: a module's K in the listed layers instead of "k" (per-layer
+    #   dense bits: the late layers' K4 costs a fraction of the early ones', scripts/quantize/p4_dense_mix.py --layers)
     #   keys are checkpoint module names; w1 covers the gate_up pair (w1 + w3), wq_a the fused_wqa_wkv pair (wq_a + wkv)
     #   "drafter": {"attn.wq_a": 5, "attn.wq_b": 5, "attn.wo_b": 5, "ffn.shared_experts.w1": 5,
     #               "ffn.shared_experts.w2": 5}: the DSpark drafter's dense linears from mtp.* EXL3 tensors
     #   (scripts/quantize/p4_drafter.py); modules not listed stay FP8 (wo_a always: its grouped FP8 path). main_proj
     #   reads the target's raw residual stream (|x| up to ~1.6e5): above 16 rows (exllamav3's path) its input is cast
-    #   to fp16 under a power-of-two scale (dense.py), which overflowed to NaN without it (LOG Oct 10 09:18)
+    #   to fp16 under a power-of-two scale (dense.py), which overflowed to NaN without it
     #   "engram": {"wkv": 4}: V4.1's Engram projections (layers.<1|14>.engram.wkv, FP8 6144 -> 25600 column-parallel) on
-    #   EXL3 at that K, from the variant's layers.<i>.engram.wkv.* tensors (scripts/quantize/p4_engram.py)
+    #   EXL3 at that K, from the variant's layers.<i>.engram.wkv.* tensors (scripts/quantize/p4_engram.py); row-parallel
+    #   under patch 0028's VLLM_ENGRAM_WKV_ROWPAR=1, cut by input rows from the same full tensors
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Exl3Settings":
         s = cls(raw=dict(d))
         for k in ("plan_file", "plan", "decode_kernel", "coop_max_tokens", "fused_rows", "tp_layout",
-                  "exllamav3_version", "head", "head_k", "dense"):
+                  "exllamav3_version", "head", "head_k", "drafter_head_k", "dense"):
             if k in d:
                 setattr(s, k, d[k])
         # runtime overrides for A/B sweeps (must be identical on every rank)
@@ -83,6 +92,12 @@ class Exl3Settings:
             raise ValueError(f"exl3_moe.head must be bf16, mxfp8 or exl3, got {s.head!r}")
         if s.head == "exl3" and not s.head_k:
             raise ValueError("exl3_moe.head exl3 needs head_k (the K the head was encoded at)")
+        if s.drafter_head_k is not None:
+            k = s.drafter_head_k
+            if isinstance(k, bool) or not isinstance(k, (int, float)) or not 1 <= k <= 8 or k != int(k):
+                raise ValueError(f"exl3_moe.drafter_head_k must be a whole K from 1 to 8 (the drafter head's "
+                                 f"encode), got {k!r}")
+            s.drafter_head_k = int(k)
         if s.dense is not None:
             from .dense import CKPT_NAME
             bad = set(s.dense.get("k", {})) - set(CKPT_NAME.values())
@@ -113,7 +128,8 @@ class Exl3Settings:
         lo, hi = self.dense.get("layers", [0, 1 << 30])
         if not lo <= layer <= hi:
             return None
-        k = self.dense.get("k", {}).get(CKPT_NAME[module])
+        name = CKPT_NAME[module]
+        k = self.dense.get("k_layers", {}).get(name, {}).get(str(layer), self.dense.get("k", {}).get(name))
         return int(k) if k else None
 
 
@@ -218,7 +234,8 @@ class DeepseekV41Exl3Config(DeepseekV4FP8Config):
             elif dm is not None and dm[1] != "attn.wo_a":     # DSpark drafter layers (index >= num_hidden_layers)
                 k = self.exl3_settings.drafter_k(dm[1])
                 if k:
-                    return Exl3DenseLinearMethod(dm[1], k, layer_idx=dm[0], prefetch=False)
+                    from .l2pf import DRAFTER
+                    return Exl3DenseLinearMethod(dm[1], k, layer_idx=dm[0], prefetch="drafter" if DRAFTER else False)
             elif prefix.endswith("main_proj"):                 # the drafter's context combiner (replicated)
                 k = self.exl3_settings.drafter_k("main_proj")
                 if k:
@@ -226,8 +243,19 @@ class DeepseekV41Exl3Config(DeepseekV4FP8Config):
             else:
                 m = _ENGRAM_WKV.search(prefix)
                 k = int(self.exl3_settings.dense.get("engram", {}).get("wkv", 0)) if m else 0
-                if k:                                         # Engram's hash-row projection (column-parallel, gathered)
+                if k:                                         # Engram's hash-row projection (column-parallel, gathered;
+                                                              # row-parallel with 0028's VLLM_ENGRAM_WKV_ROWPAR=1)
                     return Exl3DenseLinearMethod("engram.wkv", k, layer_idx=int(m.group(1)), prefetch=False)
+        if isinstance(layer, ParallelLMHead) and (prefix == DRAFTER_HEAD_PREFIX
+                                                  or prefix.endswith("." + DRAFTER_HEAD_PREFIX)):
+            # The DSpark drafter's own head (patch 0026 asks for it only under VLLM_DSPARK_OWN_HEAD=1): EXL3 at
+            # drafter_head_k, outside l2pf's head prefetch, which stays on the target's head. Without drafter_head_k the
+            # checkpoint has no drafter head: no method, and the drafter shares the target's head as before.
+            if self.exl3_settings.drafter_head_k:
+                from .head import Exl3HeadMethod
+
+                return Exl3HeadMethod(self.exl3_settings.drafter_head_k, prefetch=False)
+            return None
         if isinstance(layer, ParallelLMHead) and prefix.endswith("lm_head"):
             # Only reached with patch 0005 (V4.1 builds its head without a quant config otherwise). Only the lm_head:
             # another vocab projection handed this config (e.g. a DSpark Markov head, markov_w2) has no head.* pieces.
@@ -253,6 +281,11 @@ class DeepseekV41Exl3Config(DeepseekV4FP8Config):
             # (idx >= num_hidden_layers) unless the plan's "drafter" section lists them (p4_drafter_experts.py).
         method = super().get_quant_method(layer, prefix)
         if isinstance(layer, LinearBase) and method is not None:
+            from . import woa_qdq
+            if woa_qdq.enabled() and woa_qdq.is_wo_a(prefix):
+                # VLLM_DSV41_WOA_QDQ=1 on a wo_a that stays FP8 (the DSpark drafter's, or a backbone one without an EXL3
+                # K): DeepSeek's FP8 round trip of o before its Marlin bmm, set up after the method's own loading
+                woa_qdq.hook_fp8(method, prefix)
             from . import hcap
             if hcap.enabled(prefix):                     # VLLM_EXL3_HCAP: input Hessians of FP8 linears (hcap.py)
                 return hcap.HCaptureMethod(method, prefix)

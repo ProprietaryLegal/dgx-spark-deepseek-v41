@@ -10,13 +10,16 @@ following third-party work:
   plugin and quantization scripts, not copied (license text: patches/exl3_moe/vllm_exl3_moe/csrc/LICENSE.exllamav3).
 - TensorFold (Apache-2.0, github.com/ashhart/TensorFold and bertholomus's DeepSeek-V4.1 fork): the RDMA all-reduce ring,
   the paced L2 prefetch kernel, its grouped EXL3 prompt kernels for the routed experts (copied unchanged into
-  csrc/tf_experts/ from TensorFold commit 90b68e06, on by default since v1.1), and design ideas behind the sparse verify attention and the shared-expert slot, each
-  file marked and listed in patches/exl3_moe/vllm_exl3_moe/csrc/NOTICE.tensorfold, which carries TensorFold's NOTICE:
+  csrc/tf_experts/ from TensorFold commit 90b68e06, on by default since v1.1), and design ideas behind the sparse verify attention, the shared-expert slot, the vocabulary-shard argmax pair
+  (patches 0012 and 0027) and the row-parallel Engram projection (patch 0028), each file marked and listed in patches/exl3_moe/vllm_exl3_moe/csrc/NOTICE.tensorfold, which carries TensorFold's NOTICE:
 
     TensorFold
     Copyright 2026 TensorFold contributors
     https://github.com/ashhart/TensorFold
 
+- HeNryous/deepseek-v41-1017-dgx-spark (Apache-2.0): patches 0024 and 0025 rework its patches 0033a and 0033b (the
+  RoPE tables built only to the serve's length, the sparse indexer's prefill buffer at 8x instead of 40x).
 - DeepSeek-V4.1-Flash (MIT, Copyright (c) 2023 DeepSeek, huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash): the model.
-  Our quantized weights are derived from the official checkpoint at revision 2cba9e42 under its MIT license.
+  Our quantized weights are derived from the official checkpoints at revisions 2cba9e42 and 1bae0e10
+  (DeepSeek-V4.1-Flash-1017) under their MIT license.
 - kit_bench.py (bertholomus) is the measurement client behind our speed numbers; it is not vendored here.

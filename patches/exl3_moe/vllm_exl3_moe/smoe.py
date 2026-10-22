@@ -9,30 +9,46 @@ attach_shared(): the layer's shared expert (its EXL3 dense gate_up / down, same 
 slot) becomes physical slot E; a call with shared=True gives every live row that slot as one more pick with weight 1,
 summed with the routed picks in pick order: the output is then routed + shared, this rank's partial sum.
 
-fused(): a decode step's whole MoE phase in one persistent launch (Program P stage P2): router GEMV + DeepSeek-V4
+fused(): a decode step's whole MoE phase in one persistent launch: router GEMV + DeepSeek-V4
 top-k + routed experts + the shared expert, whose stream starts beside the router instead of after routing.
 Bit-identical to exl3_router.router_topk followed by __call__(..., shared=True).
+
+EXL3_L2_DISCARD=1 (default 0 until measured on the serve): the build with -DSMOE_L2_DISCARD=1, where the warp that sums
+a token's picks drops their per-slot fp32 outputs (ys) from L2 (discard.global.L2) instead of leaving them to be
+written back to DRAM as the next weights stream through; the outputs keep their bits (tests/test_l2_discard_gpu.py).
 """
 
 from __future__ import annotations
+
+import os
 
 import torch
 
 from .bank import Exl3Bank
 
-_ext = None
+_ext: dict[bool, object] = {}
 _SCRATCH: dict[tuple, tuple[torch.Tensor, ...]] = {}
 _FUSED: dict[tuple, dict[str, torch.Tensor]] = {}
 MAX_SLOTS = 256                 # m * top_k per call (exl3_smoe.cu)
 FUSED_MAX_ROWS = 8              # tokens a fused launch (exl3_smoe.cu R_MAXM)
 
 
-def ext():
-    global _ext
-    if _ext is None:
+def l2_discard() -> bool:
+    """EXL3_SMOE_L2_DISCARD (0 / 1) overrides EXL3_L2_DISCARD for this kernel alone (isolating one kernel's discard in an A/B)."""
+    v = os.environ.get("EXL3_SMOE_L2_DISCARD")
+    return (v if v is not None else os.environ.get("EXL3_L2_DISCARD", "0")) == "1"
+
+
+def ext(discard: bool | None = None):
+    """The compiled kernels; `discard` picks the L2-discard build (None: as EXL3_L2_DISCARD says). Each build is a
+    module of its own (jit.py hashes the flag into its name), so both can live in one process."""
+    d = l2_discard() if discard is None else bool(discard)
+    e = _ext.get(d)
+    if e is None:
         from .jit import load
-        _ext = load("exl3_smoe", "EXL3_SMOE_FLAGS")             # e.g. EXL3_SMOE_FLAGS="-DSMOE_OBI=4" (tuning)
-    return _ext
+        # e.g. EXL3_SMOE_FLAGS="-DSMOE_OBI=4" (tuning)
+        e = _ext[d] = load("exl3_smoe", "EXL3_SMOE_FLAGS", cflags=("-DSMOE_L2_DISCARD=1",) if d else ())
+    return e
 
 
 def supported(bank: Exl3Bank) -> bool:
@@ -42,11 +58,11 @@ def supported(bank: Exl3Bank) -> bool:
             and bank.inter_local % 128 == 0)
 
 
-def _scratch(device: torch.device, H: int, I: int):
+def _scratch(device: torch.device, H: int, I: int, e=None):
     key = (str(device), H, I)
     sc = _SCRATCH.get(key)
     if sc is None:
-        n_hs, n_act, n_ys, n_rt, n_ctr = ext().sizes(H, I)
+        n_hs, n_act, n_ys, n_rt, n_ctr = (e or ext()).sizes(H, I)
         sc = (torch.empty(n_hs, dtype=torch.float16, device=device),
               torch.empty(n_act, dtype=torch.float16, device=device),
               torch.empty(n_ys, dtype=torch.float32, device=device),
@@ -56,7 +72,7 @@ def _scratch(device: torch.device, H: int, I: int):
     return sc
 
 
-def _fused_scratch(device: torch.device, n: int, top_k: int) -> dict[str, torch.Tensor]:
+def _fused_scratch(device: torch.device, n: int, top_k: int, e=None) -> dict[str, torch.Tensor]:
     """Routing workspace and sync words of the fused launch, shared by every layer (layers run in stream order; the
     launch leaves its sync words zero)."""
     key = (str(device), n, top_k)
@@ -65,7 +81,7 @@ def _fused_scratch(device: torch.device, n: int, top_k: int) -> dict[str, torch.
         sc = {"ws": torch.empty(2 * FUSED_MAX_ROWS * n, dtype=torch.float32, device=device),
               "ids": torch.zeros(FUSED_MAX_ROWS * top_k, dtype=torch.int32, device=device),
               "w": torch.zeros(FUSED_MAX_ROWS * top_k, dtype=torch.float32, device=device),
-              "sync": torch.zeros(ext().sync_words(), dtype=torch.int32, device=device),
+              "sync": torch.zeros((e or ext()).sync_words(), dtype=torch.int32, device=device),
               "f32": torch.empty(0, dtype=torch.float32, device=device),
               "i64": torch.empty(0, dtype=torch.int64, device=device)}
         _FUSED[key] = sc
@@ -75,7 +91,7 @@ def _fused_scratch(device: torch.device, n: int, top_k: int) -> dict[str, torch.
 class SmoeLayer:
     """One layer's banks registered with the kernel (raw pointers: rebuild if the bank tensors ever move)."""
 
-    def __init__(self, bank: Exl3Bank, top_k: int):
+    def __init__(self, bank: Exl3Bank, top_k: int, discard: bool | None = None):
         if not supported(bank):
             raise ValueError("exl3_smoe: needs integer K in 2..6 and 128-aligned shapes")
         t, bl, lp = bank.t, bank.bl, bank.lp
@@ -94,9 +110,10 @@ class SmoeLayer:
         for n in ("w13_trellis", "w2_trellis", "w13_suh", "w13_svh", "w2_suh", "w2_svh"):
             if not t[n].is_contiguous():
                 raise ValueError(f"exl3_smoe: {n} must be contiguous")
-        self.handle = ext().register(t["w13_trellis"], t["w2_trellis"], *self.tables, t["w13_suh"], t["w13_svh"],
-                                     t["w2_suh"], t["w2_svh"], self.H, self.I)
-        self.scratch = _scratch(dev, self.H, self.I)
+        self.ext = ext(discard)                                     # the handle belongs to this build's registry
+        self.handle = self.ext.register(t["w13_trellis"], t["w2_trellis"], *self.tables, t["w13_suh"], t["w13_svh"],
+                                        t["w2_suh"], t["w2_svh"], self.H, self.I)
+        self.scratch = _scratch(dev, self.H, self.I, self.ext)
         self.has_shared = False
 
     def attach_shared(self, gate, up, down) -> None:
@@ -104,8 +121,8 @@ class SmoeLayer:
         anything with trellis int16 [in/16, out/16, 16K], suh [in], svh [out] fp16): gate / up [H -> I], down [I -> H]."""
         def c(v):
             return v if v.is_contiguous() else v.contiguous()
-        ext().attach_shared(self.handle, c(gate.trellis), c(up.trellis), c(down.trellis), c(gate.suh), c(up.suh),
-                            c(gate.svh), c(up.svh), c(down.suh), c(down.svh))
+        self.ext.attach_shared(self.handle, c(gate.trellis), c(up.trellis), c(down.trellis), c(gate.suh), c(up.suh),
+                               c(gate.svh), c(up.svh), c(down.suh), c(down.svh))
         self._shared_keep = (gate, up, down)
         self.has_shared = True
 
@@ -125,11 +142,12 @@ class SmoeLayer:
         m = x.shape[0]
         if x.stride(-1) != 1 or x.data_ptr() % 16 or x.stride(0) % 8:
             x = x.contiguous().clone()
-        sc = _fused_scratch(x.device, gate_weight.shape[0], self.top_k)
+        sc = _fused_scratch(x.device, gate_weight.shape[0], self.top_k, self.ext)
         out = torch.empty((m, self.H), dtype=torch.bfloat16, device=x.device)
-        ext().run_fused(self.handle, x, gate_weight, bias, sc["f32"] if bias_vl is None else bias_vl,
-                        sc["i64"] if token_ids is None else token_ids, int(sentinel_lo), float(scale), self.top_k, perm,
-                        out, float(act_limit), *self.scratch, pad, int(shared), sc["ws"], sc["ids"], sc["w"], sc["sync"])
+        self.ext.run_fused(self.handle, x, gate_weight, bias, sc["f32"] if bias_vl is None else bias_vl,
+                           sc["i64"] if token_ids is None else token_ids, int(sentinel_lo), float(scale), self.top_k,
+                           perm, out, float(act_limit), *self.scratch, pad, int(shared), sc["ws"], sc["ids"], sc["w"],
+                           sc["sync"])
         k = self.top_k
         return out, sc["ids"][: m * k].view(m, k), sc["w"][: m * k].view(m, k)
 
@@ -148,5 +166,5 @@ class SmoeLayer:
         if ids.stride(-1) != 1:
             ids = ids.contiguous()
         out = torch.empty((m, self.H), dtype=torch.bfloat16, device=x.device)
-        ext().run(self.handle, x, ids, w, perm, out, float(act_limit), *self.scratch, pad, int(shared))
+        self.ext.run(self.handle, x, ids, w, perm, out, float(act_limit), *self.scratch, pad, int(shared))
         return out

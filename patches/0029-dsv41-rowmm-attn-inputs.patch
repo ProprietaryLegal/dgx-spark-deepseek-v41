@@ -1,0 +1,75 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0021 + 0023-0028 (touches attention.py only).
+EXL3_ROWMM=1 (default off; needs the vllm_exl3_moe plugin): V4.1's decode-size bf16 attention-input projections run on
+the plugin's row GEMM (vllm_exl3_moe/rowmm.py, csrc/exl3_router.cu rowmm) instead of cuBLAS: the compressor's fused
+wkv / wgate [1024 | 512, 5120] -> fp32 (kv-source layers 2, 8, 14, 20), the indexer's weights_proj [32, 5120] -> bf16
+(the 8 index layers) and wk [128, 512] -> bf16 on the compressor latent. On GB10 cuBLAS takes 87-97 us for the
+compressor's 10.5 MB (split-K, ~108 GB/s) and 40-55 us for weights_proj's 0.33 MB; both run on aux streams beside
+wq_a + wkv (31-42 us) and the default stream joins them before wq_b, so index layers ran ~47 us and kv-source layers
+~105 us longer than plain layers, ~0.6 ms a round (prose profile, Oct 21). The row
+GEMM streams one weight row a warp at DRAM rate for up to 8 rows; any other shape (prefill, larger batches), a missing
+plugin or the flag off keeps today's path. fp32 sums in a fixed order: deterministic, not bit-equal to cuBLAS's split-K
+order, so a rounding-class change (bf16 outputs rounded to nearest even as F.linear's). Tests: plugin
+tests/test_rowmm_gpu.py (rowmm vs fp64, bf16 = rounded fp32, ok() refusals, CUDA-graph replay).
+
+diff --git a/vllm/models/deepseek_v41/attention.py b/vllm/models/deepseek_v41/attention.py
+index 777f4d6..0a209fe 100644
+--- a/vllm/models/deepseek_v41/attention.py
++++ b/vllm/models/deepseek_v41/attention.py
+@@ -81,6 +81,22 @@ from vllm.v1.kv_cache_interface import (
+ 
+ logger = init_logger(__name__)
+ 
++# Decode-size bf16 input projections (the compressor's wkv / wgate, the indexer's weights_proj and wk) on the EXL3
++# plugin's row GEMM when EXL3_ROWMM=1 (vllm_exl3_moe/rowmm.py); otherwise, or for shapes it does not take, cuBLAS.
++try:
++    from vllm_exl3_moe import rowmm as _rowmm
++except ImportError:
++    _rowmm = None
++
++
++def _rowmm_or_none(
++    x: torch.Tensor, w: torch.Tensor, out_dtype: torch.dtype
++) -> torch.Tensor | None:
++    """x @ w.T as out_dtype on the plugin's row GEMM, or None when it does not apply."""
++    if _rowmm is not None and _rowmm.ok(x, w):
++        return _rowmm.mm(x, w, out_dtype)
++    return None
++
+ 
+ def _replace_layer_index(prefix: str, layer_id: int) -> str:
+     """Swap the layer index inside a ``...layers.<idx>...`` prefix."""
+@@ -935,6 +951,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
+             compressor = self.compressor
+ 
+             def compressor_kv_score() -> torch.Tensor:
++                kv_score = _rowmm_or_none(
++                    hidden_states, compressor.fused_wkv_wgate.weight, torch.float32
++                )
++                if kv_score is not None:
++                    return kv_score
+                 return torch.mm(
+                     hidden_states,
+                     compressor.fused_wkv_wgate.weight.T,
+@@ -947,6 +968,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
+             indexer = self.indexer
+ 
+             def indexer_weights_proj() -> torch.Tensor:
++                weights = _rowmm_or_none(
++                    hidden_states, indexer.weights_proj.weight, hidden_states.dtype
++                )
++                if weights is not None:
++                    return weights
+                 # ReplicatedLinear returns (output, bias); bias is None.
+                 weights, _ = indexer.weights_proj(hidden_states)
+                 return weights
+@@ -1442,7 +1468,9 @@ class DeepseekV4Indexer(nn.Module):
+         # ReplicatedLinear returns (output, bias); bias is None. Rows at
+         # non-boundary tokens hold garbage latent and are skipped by the
+         # store kernel.
+-        k_pre, _ = self.wk(latent)
++        k_pre = _rowmm_or_none(latent, self.wk.weight, latent.dtype)
++        if k_pre is None:
++            k_pre, _ = self.wk(latent)
+         indexer_k_norm_rope_store(
+             k_pre,
+             positions,

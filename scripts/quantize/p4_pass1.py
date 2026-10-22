@@ -21,6 +21,7 @@ Outputs: /out/layer_XX.partI.safetensors (EXL3 tensors, plugin key names), /out/
 Partial re-encode (--reuse CKPT --old-plan PLAN): an expert whose K (gate/up and down) is the same in both plans is not
 re-encoded: its EXL3 tensors come from the assembled checkpoint CKPT (model-exl3-LXX.safetensors, encoded with PLAN)
 and only its quantized output enters Y, so the stream still runs through every quantized expert of earlier layers.
+Comma lists (--reuse A,B --old-plan PA,PB) reuse from the first checkpoint that holds an expert at its new K.
 The changed experts are split over the parts by K (the encode cost), the unchanged ones round-robin, and the part files
 hold only the re-encoded experts (a resume or an assembly takes the rest from CKPT).
 
@@ -76,34 +77,63 @@ class _Parts:
 
 
 class Reuse:
-    """Old EXL3 experts from an assembled checkpoint (p4_assemble.py layout: model-exl3-LXX.safetensors, plugin key
-    names) and the plan they were encoded with."""
+    """Old EXL3 experts from assembled checkpoints (p4_assemble.py layout: model-exl3-LXX.safetensors, plugin key names)
+    and the plans they were encoded with. Several pairs (--reuse A,B --old-plan PA,PB): an expert comes from the first
+    checkpoint whose plan gives it the new plan's K (gate/up and down), so only the experts that no checkpoint holds at
+    their new K are re-encoded (e.g. a plan that moves some experts up past one build and others back to an older one)."""
 
-    def __init__(self, ckpt, old_plan):
-        self.ckpt, self.old = ckpt, json.load(open(old_plan))
+    device = "cuda"
+
+    def __init__(self, ckpts, old_plans, plan):
+        ckpts = [c for c in ckpts.split(",") if c] if isinstance(ckpts, str) else list(ckpts)
+        olds = [p for p in old_plans.split(",") if p] if isinstance(old_plans, str) else list(old_plans)
+        if not ckpts or len(ckpts) != len(olds):
+            raise SystemExit(f"--reuse lists {len(ckpts)} checkpoints and --old-plan {len(olds)} plans: they pair up")
+        self.ckpts, self.plan = ckpts, plan
+        self.olds = [p if isinstance(p, dict) else json.load(open(p)) for p in olds]
+        self._open = {}                                # (checkpoint, layer) -> open file, one layer at a time
+
+    @staticmethod
+    def kpair(p, l, e):
+        x = p["layers"][str(l)]
+        return x["k"][e], x.get("k_down", x["k"])[e]
+
+    def source(self, l, e):
+        """Index of the first checkpoint whose plan gives expert e of layer l the new plan's K, or None."""
+        want = self.kpair(self.plan, l, e)
+        return next((i for i, o in enumerate(self.olds) if self.kpair(o, l, e) == want), None)
 
     def changed(self, plan, l):
-        """Experts of layer l whose gate/up or down K differs between the plans."""
-        o, n = self.old["layers"][str(l)], plan["layers"][str(l)]
-        ok, nk = o["k"], n["k"]
-        od, nd = o.get("k_down", ok), n.get("k_down", nk)
-        return [e for e in range(len(nk)) if (nk[e], nd[e]) != (ok[e], od[e])]
+        """Experts of layer l that no checkpoint holds at the new plan's K (gate/up or down): the ones to encode."""
+        if plan is not self.plan and plan != self.plan:
+            raise SystemExit("reuse: changed() asked about another plan than the one given at construction")
+        return [e for e in range(len(plan["layers"][str(l)]["k"])) if self.source(l, e) is None]
 
-    def open(self, l):
+    def _layer_file(self, i, l):
+        if (i, l) not in self._open:
+            self._open = {k: v for k, v in self._open.items() if k[1] == l}
+            self._open[(i, l)] = self.open_layer(self.ckpts[i], l, self.device)
+        return self._open[(i, l)]
+
+    @staticmethod
+    def open_layer(ckpt, l, device="cuda"):
         """Layer l's experts: model-exl3-LXX.safetensors (p4_assemble.py) or its 2-box parts model-exl3-LXX-p*.safetensors
         (the v3 dirs), the latter behind one keys() / get_tensor() view."""
         from safetensors import safe_open
-        one = os.path.join(self.ckpt, f"model-exl3-L{l:02d}.safetensors")
+        one = os.path.join(ckpt, f"model-exl3-L{l:02d}.safetensors")
         if os.path.exists(one):
-            return safe_open(one, "pt", device="cuda")
-        parts = sorted(glob.glob(os.path.join(self.ckpt, f"model-exl3-L{l:02d}-p*.safetensors")))
+            return safe_open(one, "pt", device=device)
+        parts = sorted(glob.glob(os.path.join(ckpt, f"model-exl3-L{l:02d}-p*.safetensors")))
         if not parts:
-            raise SystemExit(f"reuse: no model-exl3-L{l:02d}[-p*].safetensors in {self.ckpt}")
-        return _Parts([safe_open(f, "pt", device="cuda") for f in parts])
+            raise SystemExit(f"reuse: no model-exl3-L{l:02d}[-p*].safetensors in {ckpt}")
+        return _Parts([safe_open(f, "pt", device=device) for f in parts])
 
-    @staticmethod
-    def expert(f, l, e):
-        """{proj: {piece: tensor}} of expert e from an open layer file."""
+    def expert(self, l, e):
+        """{proj: {piece: tensor}} of expert e of layer l from the checkpoint that holds it at the new plan's K."""
+        i = self.source(l, e)
+        if i is None:
+            raise SystemExit(f"reuse: layer {l} expert {e} is at its new K in none of {self.ckpts}")
+        f = self._layer_file(i, l)
         pre = f"layers.{l}.ffn.experts.{e}."
         out = {}
         for k in f.keys():
@@ -111,7 +141,7 @@ class Reuse:
                 proj, piece = k[len(pre):].split(".", 1)
                 out.setdefault(proj, {})[piece] = f.get_tensor(k)
         if set(out) != {"w1", "w3", "w2"}:
-            raise SystemExit(f"layer {l} expert {e}: {sorted(out)} in the reuse checkpoint")
+            raise SystemExit(f"layer {l} expert {e}: {sorted(out)} in the reuse checkpoint {self.ckpts[i]}")
         return out
 
 
@@ -228,7 +258,6 @@ def quantize_layer(s, blk, l, plan, part, nparts, out_dir, tau, exchange, limit,
         changed = set(reuse.changed(plan, l))
         part_of = assign_parts(plan, l, changed, nparts)
         mine = [e for e in range(384) if part_of[e] == part]
-        old_f = reuse.open(l)
         log(f"  layer {l:2d}: {len(changed)} experts change K, this part re-encodes "
             f"{sum(1 for e in mine if e in changed)} and reuses {sum(1 for e in mine if e not in changed)}")
     for e in mine:
@@ -240,7 +269,7 @@ def quantize_layer(s, blk, l, plan, part, nparts, out_dir, tau, exchange, limit,
         tok, slot = (Ir == e).nonzero(as_tuple=True)
         n_e = tok.numel()
         if changed is not None and e not in changed:               # same K as the reuse checkpoint: its tensors
-            old = Reuse.expert(old_f, l, e)
+            old = reuse.expert(l, e)
             t2 = time.time()
             t_h += t2 - t1
             Wq1 = reconstruct(old["w1"], 5120, 2304)
@@ -356,8 +385,9 @@ def main():
     ap.add_argument("--max-seqs", type=int, default=0)
     ap.add_argument("--index", default="", help="build.py's index of the calibration set (for --domain-weights)")
     ap.add_argument("--domain-weights", default="", help="domain=weight,...: domain-weighted Hessians")
-    ap.add_argument("--reuse", default="", help="assembled checkpoint whose experts are kept where the K is unchanged")
-    ap.add_argument("--old-plan", default="", help="the plan --reuse was encoded with")
+    ap.add_argument("--reuse", default="", help="assembled checkpoint(s), comma list: experts are kept where one holds "
+                                                "them at the new K")
+    ap.add_argument("--old-plan", default="", help="the plan(s) --reuse was encoded with, same order")
     ap.add_argument("--head", type=int, default=0,
                     help="also encode the lm_head at this K from the stream's final hidden states (part 0 of a run "
                          "through the last layer; p4_dense.encode_head): <out>/dense_head.safetensors, its H in head_H.pt")
@@ -371,7 +401,7 @@ def main():
     plan = json.load(open(a.plan))
     if bool(a.reuse) != bool(a.old_plan):
         raise SystemExit("--reuse and --old-plan go together")
-    reuse = Reuse(a.reuse, a.old_plan) if a.reuse else None
+    reuse = Reuse(a.reuse, a.old_plan, plan) if a.reuse else None
     logf = open(os.path.join(a.out, f"pass1.part{part}.log"), "a")
 
     def log(msg):
@@ -430,9 +460,8 @@ def replay_layer(s, blk, l, out_dir, nparts, limit, reuse=None, moe_chunk=65536)
         drop_page_cache(f)
     have = {int(k.split(".")[4]) for k in tens if ".ffn.experts." in k}
     if reuse is not None:
-        old_f = reuse.open(l)
         for e in sorted(set(range(384)) - have):
-            for proj, pieces in Reuse.expert(old_f, l, e).items():
+            for proj, pieces in reuse.expert(l, e).items():
                 for piece, v in pieces.items():
                     tens[f"layers.{l}.ffn.experts.{e}.{proj}.{piece}"] = v
         have = set(range(384))

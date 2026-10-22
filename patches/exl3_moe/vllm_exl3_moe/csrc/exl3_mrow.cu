@@ -2,7 +2,8 @@
 // exl3_mrow: EXL3 linears (mul1 codebook, K = 2..6) at decode sizes (1..16 rows), several linears per launch.
 //
 // One work item = one problem (linear) x one 128-column output block x one k-slice. Eight consumer warps (one 16-column
-// tile each) transform the item's slice of the input (bf16 -> * suh -> 128-wide Hadamard -> fp16 in shared memory),
+// tile each) transform the item's slice of the input (bf16 -> * suh -> 128-wide Hadamard -> fp16 in shared memory; the
+// -DMROW_QDQ=1 build, wo_a's, first gives the bf16 input DeepSeek's FP8 round trip, see qdq_ue8m0_x4),
 // decode the trellis tiles straight into tensor-core B fragments (the decode's register layout is the m16n8k16 B
 // layout), accumulate in fp32 with mma.sync, apply the output Hadamard and svh to their partial (both linear, so per
 // k-slice is exact), and the last block of an output block (one atomic counter, no waiting) sums the k-slices in slice
@@ -23,6 +24,9 @@
 #include <c10/cuda/CUDAException.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
+#if MROW_QDQ
+#include <cuda_fp8.h>
+#endif
 
 #include "exl3_common.cuh"
 #include "exl3_launch.h"
@@ -58,6 +62,12 @@ constexpr int MAX_P = 8;
 #ifndef MROW_L2HINT
 #define MROW_L2HINT 0    // with MROW_CPASYNC: 128 / 256 = the copies ask L2 for 128- / 256-byte DRAM fetches
 #endif
+#ifndef MROW_L2_DISCARD
+#define MROW_L2_DISCARD 0   // 1 (EXL3_L2_DISCARD=1, mrow.py): the k-split partials leave L2 unwritten once summed (step 4)
+#endif
+#ifndef MROW_QDQ
+#define MROW_QDQ 0          // 1 (VLLM_DSV41_WOA_QDQ=1, wo_a's group only, mrow.py): x gets DeepSeek's FP8 round trip on load
+#endif
 constexpr int MAX_KS = MROW_MAX_KS;   // k-slice cap: the transformed input slice lives in shared memory
 constexpr int PIPE = MROW_PIPE;       // trellis stages (k-rows of the item) in flight
 static_assert(PIPE >= 2 && PIPE % 2 == 0, "MROW_PIPE: even, >= 2 (two k-rows per loop step)");
@@ -74,6 +84,8 @@ struct Problem
     int item_start;              // first work item of this problem
     long long ws_off;            // float offset of this problem's k-slice partials ([n_slices][MAX_M][n])
     int ctr_off;                 // offset of this problem's per-output-block counters
+    int strips;                  // 1: trellis in strips, [n/128][k/16][8 tiles][16K] (set_strips): an item's k-rows
+                                 // contiguous, so its whole K range streams as one run (the heads, EXL3_HEAD_STRIPS)
 };
 
 struct Group
@@ -95,6 +107,39 @@ __host__ __device__ constexpr int smem_bytes(int K, int rows, int ks_max)
 
 // mbarrier / TMA helpers, tile decode, mma and Hadamard: exl3_common.cuh
 __device__ __forceinline__ void consumer_sync() { asm volatile("bar.sync 1, %0;\n" :: "n"(CONSUMER_THREADS) : "memory"); }
+
+#if MROW_QDQ
+// DeepSeek-V4.1-Flash-1017's act_quant(o, 32, "ue8m0", e8m0, inplace=True) before wo_a (inference/model.py:787, 1073;
+// the semantics and line references are in woa_qdq.py), on the four values a lane loads in step 1: a 32-value group is
+// 8 lanes of a 128-wide block (lanes 8j .. 8j + 7 hold its columns 32j .. 32j + 31, problem-local). amax over the
+// group (xor shuffles inside the 8 lanes), at least 1e-4; s = 2^ceil(log2(amax * fl32(1/448))) from the IEEE bits like
+// the reference's fast_round_scale; x / s (exact, as x * 2^-e) to e4m3 round-to-nearest-even (satfinite: |x / s| <= 448,
+// so it never clamps), back times s. The reference stores that product as bf16; here it already is a bf16 value (4
+// significant bits at most, 2^-31 <= |q s| <= 240 * 2^120 when not zero) or inf (256 * 2^120 overflows fp32 as it does
+// bf16), so that store would change nothing and is left out. Same bits as woa_qdq.py's kernel, which the prompt sizes
+// use (tests/test_woa_qdq_gpu.py).
+__device__ __forceinline__ float2 qdq_e4m3x2(float2 v, float s, float inv)
+{
+    const __half2_raw q = __nv_cvt_fp8x2_to_halfraw2(
+        __nv_cvt_float2_to_fp8x2(make_float2(v.x * inv, v.y * inv), __NV_SATFINITE, __NV_E4M3), __NV_E4M3);
+    const float2 f = __half22float2(__half2(q));
+    return make_float2(f.x * s, f.y * s);
+}
+
+__device__ __forceinline__ void qdq_ue8m0_x4(float2& x01, float2& x23)
+{
+    float a = fmaxf(fmaxf(fabsf(x01.x), fabsf(x01.y)), fmaxf(fabsf(x23.x), fabsf(x23.y)));
+    a = fmaxf(a, __shfl_xor_sync(0xffffffffu, a, 1));
+    a = fmaxf(a, __shfl_xor_sync(0xffffffffu, a, 2));
+    a = fmaxf(a, __shfl_xor_sync(0xffffffffu, a, 4));
+    const uint32_t t = __float_as_uint(fmaxf(a, 1e-4f) * (1.0f / 448.0f));
+    const int e = (int) ((t >> 23) & 0xFFu) - 127 + ((t & 0x7FFFFFu) != 0u);     // -22 .. 120 for finite bf16
+    const float s = __uint_as_float((uint32_t) (e + 127) << 23);
+    const float inv = e < 128 ? __uint_as_float((uint32_t) (127 - e) << 23) : 0.f;   // inf amax: the reference's NaN group
+    x01 = qdq_e4m3x2(x01, s, inv);
+    x23 = qdq_e4m3x2(x23, s, inv);
+}
+#endif
 
 // one stage (SB bytes, contiguous) by the producer warp's 32 lanes in 16-byte cp.async pieces; the stage's mbarrier
 // counts one arrival per lane, each fired when that lane's copies have landed (MROW_CPASYNC)
@@ -162,9 +207,10 @@ __global__ void __launch_bounds__(THREADS, MROW_MINB) mrow_kernel
     if (warp == WARPS)
     {
         const int tiles_n = P.n / 16;
-        const size_t row_bytes = (size_t) tiles_n * TB;
+        const size_t row_bytes = P.strips ? (size_t) SB : (size_t) tiles_n * TB;
         const unsigned char* src = reinterpret_cast<const unsigned char*>(P.trellis)
-                                   + ((size_t) (k0 / 16) * tiles_n + n0 / 16) * TB;
+                                   + (P.strips ? ((size_t) nb * (P.k / 16) + k0 / 16) * SB
+                                               : ((size_t) (k0 / 16) * tiles_n + n0 / 16) * TB);
         const int pre = kts < PIPE ? kts : PIPE;
 #if MROW_CPASYNC
         for (int kk = 0; kk < pre; ++kk) stage_cp_async<SB>(ring + kk * SB, src + kk * row_bytes, &full[kk], lane);
@@ -236,8 +282,11 @@ __global__ void __launch_bounds__(THREADS, MROW_MINB) mrow_kernel
             if (u >= ntask) break;
             const int r = u / kblocks;
             const int bb = u % kblocks;
-            const float2 x01 = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&xv[i].x));
-            const float2 x23 = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&xv[i].y));
+            float2 x01 = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&xv[i].x));
+            float2 x23 = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&xv[i].y));
+#if MROW_QDQ
+            qdq_ue8m0_x4(x01, x23);          // the whole warp is here (u is warp-uniform), so the shuffles see all 32 lanes
+#endif
             const float2 h01 = __half22float2(*reinterpret_cast<const half2*>(&hv[i].x));
             const float2 h23 = __half22float2(*reinterpret_cast<const half2*>(&hv[i].y));
             float v[4] = {x01.x * h01.x, x01.y * h01.y, x23.x * h23.x, x23.y * h23.y};
@@ -351,6 +400,24 @@ __global__ void __launch_bounds__(THREADS, MROW_MINB) mrow_kernel
         ov.x = *reinterpret_cast<const uint32_t*>(&o01);
         ov.y = *reinterpret_cast<const uint32_t*>(&o23);
         *reinterpret_cast<uint2*>(out + (size_t) r * out_stride + P.out_col + oc) = ov;
+#if MROW_L2_DISCARD
+        // Row r's partials of this output block, every k-slice (n_slices x 512 bytes, four 128-byte lines each: ws is
+        // 128-byte aligned and ws_off, the (slice, row) offsets and n0 are multiples of 128 floats), are dead here, so
+        // their dirty L2 lines are dropped instead of written back to DRAM. Why nothing can read a dropped line:
+        //  - writers: each k-slice block wrote its rows in step 3 and ran __threadfence() before its arrival on this
+        //    output block's counter; this block took the last arrival and fenced, so every partial was in L2 before the
+        //    __ldcg loads above;
+        //  - readers: only this block reads them, and row r only in this warp (rows r = warp, warp + 8). Each lane's
+        //    loads feed acc and the bf16 store just above, so they have returned before the lane reaches __syncwarp(),
+        //    which orders all 32 lanes' loads before any lane's discard;
+        //  - the next writer is this group's next launch, whose consumers write ws only after griddepcontrol.wait, i.e.
+        //    after this grid has completed (the ordering the loads and the counter reset already rely on), and a launch
+        //    writes every (slice, row, column) partial it sums before reading it, so a dropped line is never read.
+        __syncwarp();
+        const float* zr = ws + P.ws_off + (size_t) r * P.n + n0;
+        for (int i = lane; i < P.n_slices * 4; i += 32)
+            l2_discard(zr + (size_t) (i >> 2) * m * P.n + (i & 3) * 32);
+#endif
     }
     if (threadIdx.x == 0) ctr[P.ctr_off + nb] = 0;
 }
@@ -440,6 +507,7 @@ int64_t mrow_register(std::vector<at::Tensor> trellis, std::vector<at::Tensor> s
         p.ws_off = ws_floats;
         if (p.n_slices > 1) ws_floats += (long long) p.n_slices * MAX_M * n;
         p.ctr_off = ctrs;
+        p.strips = 0;
         ctrs += p.n_blocks;
         h.keep.push_back(t); h.keep.push_back(suh[i]); h.keep.push_back(svh[i]);
     }
@@ -449,8 +517,18 @@ int64_t mrow_register(std::vector<at::Tensor> trellis, std::vector<at::Tensor> s
     auto opts = trellis[0].options();
     h.ws = at::empty({std::max<long long>(ws_floats, 1)}, opts.dtype(at::kFloat));
     h.ctr = at::zeros({std::max(ctrs, 1)}, opts.dtype(at::kInt));
+#if MROW_L2_DISCARD
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(h.ws.data_ptr()) % 128 == 0, "exl3_mrow: ws not 128-byte aligned (L2 discard)");
+#endif
     registry().push_back(h);
     return (int64_t) registry().size() - 1;
+}
+
+void mrow_set_strips(int64_t handle, std::vector<int64_t> strips)
+{
+    Handle& h = registry().at(handle);
+    TORCH_CHECK(strips.size() == (size_t) h.g.n_problems, "exl3_mrow: one strips flag per linear");
+    for (int i = 0; i < h.g.n_problems; ++i) h.g.p[i].strips = strips[i] ? 1 : 0;
 }
 
 std::vector<int64_t> mrow_info(int64_t handle)
@@ -515,5 +593,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod)
 {
     mod.def("register", &mrow_register, "register a group of EXL3 linears; returns a handle");
     mod.def("info", &mrow_info, "[work items, k-slice per linear...]");
+    mod.def("set_strips", &mrow_set_strips, "per linear: 1 = its trellis is in strips ([n/128][k/16][8][16K], to_strips)");
+    mod.def("workspace", [](int64_t handle) { return registry().at(handle).ws; },
+            "the group's fp32 k-split partials buffer (tests: tests/test_l2_discard_gpu.py fills it with a canary)");
     mod.def("run", &mrow_run, "run a registered group: x bf16 [m, *] (or [m, problems, *]) -> out bf16 [m, *]");
 }

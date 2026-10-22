@@ -12,12 +12,14 @@ CSRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "csrc")
 HEADERS = ("exl3_common.cuh", "exl3_launch.h")
 
 
-def load(base: str, flags_env: str, ldflags=()):
+def load(base: str, flags_env: str, ldflags=(), cflags=()):
+    """`cflags`: build flags the caller picks (a variant, e.g. mrow.py's L2 discard), after the env's; hashed like them,
+    so each variant is a module of its own and several can be loaded in one process."""
     from torch.utils.cpp_extension import load as _load
     src = os.path.join(CSRC, base + ".cu")
     arch = os.environ.get("EXL3_KERNEL_ARCH", os.environ.get("EXL3_MROW_ARCH", "121"))
     # tuning, e.g. EXL3_MROW_FLAGS="-DMROW_PIPE=4"; commas separate flags too (the launcher's env list splits on spaces)
-    flags = os.environ.get(flags_env, "").replace(",", " ").split()
+    flags = os.environ.get(flags_env, "").replace(",", " ").split() + list(cflags)
     h = hashlib.md5()
     for f in (src, *(os.path.join(CSRC, n) for n in HEADERS)):
         with open(f, "rb") as fh:

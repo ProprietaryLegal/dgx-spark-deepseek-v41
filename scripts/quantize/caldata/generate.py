@@ -6,6 +6,11 @@ is never printed. --wiki: exllamav3 v1.6.0's exllamav3/conversion/standard_cal_d
 
   python3 generate.py out.jsonl [--wiki wiki.utf8] [--workers 8] [--budget-usd 5] [--key-file <env file>]
   python3 generate.py instruct.jsonl --set instruct          the v3 calibration supplement (prompts_instruct.py)
+  python3 generate.py conversations_1017_panel.jsonl --wiki wiki.utf8 --split panel \
+      --model deepseek/deepseek-v4.1-flash-1017 --model-rev 1017
+                      a second KLD panel: the published panel's prompts (same ids, flags, tools and follow-ups) answered
+                      by another checkpoint; --model-rev goes into each row's meta with the model id OpenRouter
+                      reports for every call
 """
 from __future__ import annotations
 
@@ -26,7 +31,8 @@ SETS = {"base": prompts, "instruct": prompts_instruct}
 FOLLOWUPS = prompts.FOLLOWUPS                   # replaced by the chosen set's in main()
 
 URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "deepseek/deepseek-v4.1-flash"
+MODEL = "deepseek/deepseek-v4.1-flash"         # the launch checkpoint; --model replaces it in main()
+MODEL_REV = ""                                  # --model-rev: tags each row's meta (and records the served model ids)
 PROVIDERS = ["DeepInfra", "Together", "Parasail", "BaseTen", "SiliconFlow", "Novita", "CoreWeave", "GMICloud",
              "AtlasCloud", "StreamLake"]
 lock = threading.Lock()
@@ -88,6 +94,8 @@ def run_item(key, it, budget):
         return None
     msgs = list(it["messages"])
     meta = {"calls": 0, "cost": 0.0, "providers": [], "finish": []}
+    if MODEL_REV:
+        meta.update(model_rev=MODEL_REV, models=[])
 
     def step():
         resp = call(key, msgs, it["tools"], it["thinking"], it["effort"])
@@ -95,6 +103,8 @@ def run_item(key, it, budget):
         meta["calls"] += 1
         meta["cost"] += float(u.get("cost") or 0.0)
         meta["providers"].append(resp.get("provider"))
+        if MODEL_REV:
+            meta["models"].append(resp.get("model"))
         a, fin = assistant_message(resp)
         meta["finish"].append(fin)
         msgs.append(a)
@@ -121,6 +131,7 @@ def run_item(key, it, budget):
 
 
 def main():
+    global FOLLOWUPS, MODEL, MODEL_REV
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
     ap.add_argument("--wiki")
@@ -129,11 +140,16 @@ def main():
     ap.add_argument("--key-file", default="")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--set", choices=sorted(SETS), default="base")
+    ap.add_argument("--split", choices=["cal", "panel"], help="only the prompts of this split (ids stay the set's)")
+    ap.add_argument("--model", default=MODEL, help="OpenRouter model id (default: the launch checkpoint)")
+    ap.add_argument("--model-rev", default="", help="e.g. 1017: written into each row's meta as model_rev")
     a = ap.parse_args()
     key = read_key(a.key_file)
-    global FOLLOWUPS
     FOLLOWUPS = SETS[a.set].FOLLOWUPS
+    MODEL, MODEL_REV = a.model, a.model_rev
     items = SETS[a.set].build_prompt_set(open(a.wiki).read() if a.wiki else None)
+    if a.split:
+        items = [it for it in items if it["split"] == a.split]
     done = set()
     if os.path.exists(a.out):
         with open(a.out) as f:

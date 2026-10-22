@@ -1,0 +1,179 @@
+Ours (dsv41 recipe), Apache-2.0, against vLLM main 6e517b15 + patches 0001-0021 + 0023-0027 (touches engram.py only).
+Engram's wkv row-parallel over the hash heads (VLLM_ENGRAM_WKV_ROWPAR=1, default off, the same on every rank). Each
+decode step, per Engram layer (1 and 14), a TP rank looks up its own contiguous share of the 24 hash heads (12 at
+TP=2), embed() all-gathers the rows (60-261 us), the column-parallel wkv (6144 -> 25600, MXFP8 on Marlin, 363-395 us)
+multiplies the gathered rows by the rank's output columns, and its output is all-gathered again (45-73 us). The gathered
+rows are head-major, so a rank's own heads are exactly wkv's input-row shard (columns [rank * 3072, (rank + 1) * 3072)
+at TP=2): with the flag, wkv is a RowParallelLinear over them, embed() hands it the rank's staged rows ungathered, and
+one all-reduce of the [tokens, 25600] partial products replaces both all-gathers, at the same FLOPs and weight bytes a
+rank. TensorFold runs this layout at ~0.55 ms a round for both layers against our 1.05-1.17 ms; the layout alone should
+be worth 0.25-0.35 ms a round. No loader change: vLLM's RowParallelLinear loaders cut the checkpoint tensors by input
+rows (MXFP8: weight [25600, 3072] e4m3, the [32, 32] ue8m0 block scales repeated to rows and narrowed on input_dim at
+rank * 96 blocks; 128 x 128 FP8 blocks likewise), and the plugin's EXL3 engram.wkv takes its existing input-row cut
+(whole 16-row trellis tiles, suh cut, svh whole). Engages for TP > 1 without sequence parallelism when TP splits the
+heads into equal shares and the tables are not DP-sharded; otherwise a warning and today's layout, as with the flag
+off or at TP=1. A rounding-class change, not bit-exact: each rank's partial is rounded to bf16 before the cross-rank
+sum (at 6 rows 37% of outputs move, by at most 2 ulps of the larger partial; norm-wise error 1.48x today's), so greedy
+text can move at near-ties. Bytes: 51.2 KB of all-reduce a token a rank against 31.7 KB for the two all-gathers, so
+prefill-sized steps move more; with the RDMA ring (EXL3_RDMA_AR=1) set EXL3_RDMA_AR_MAX_KB=1024, the 256 KB default
+stops at 5 rows (a 6-row verify step is 307 KB). Row-parallel Engram is TensorFold's (github.com/bertholomus/TensorFold,
+branch deepseek-v41-tp2, Apache-2.0); the code is ours. Tests: patches/tests/test_engram_wkv_rowpar_math.py (plain
+torch, runs anywhere), patches/tests/test_engram_wkv_rowpar.py (serve image, GPU).
+
+diff --git a/vllm/models/deepseek_v41/common/engram.py b/vllm/models/deepseek_v41/common/engram.py
+index 5c5bf17..389a5c7 100644
+--- a/vllm/models/deepseek_v41/common/engram.py
++++ b/vllm/models/deepseek_v41/common/engram.py
+@@ -63,7 +63,7 @@ from vllm.distributed.device_communicators.shm_broadcast import (
+ from vllm.distributed.parallel_state import GroupCoordinator
+ from vllm.forward_context import get_forward_context, is_forward_context_available
+ from vllm.logger import init_logger
+-from vllm.model_executor.layers.linear import ColumnParallelLinear
++from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
+ from vllm.model_executor.layers.quantization import QuantizationConfig
+ from vllm.model_executor.utils import set_weight_attrs
+ from vllm.platforms import current_platform
+@@ -1515,6 +1515,46 @@ def _gather_engram_rows(staged: torch.Tensor, num_tokens: int) -> torch.Tensor:
+     return rows
+ 
+ 
++def engram_wkv_row_parallel(
++    embedding: ParallelEngramEmbedding, use_sequence_parallel: bool
++) -> bool:
++    """Whether wkv runs row-parallel over the hash heads (opt-in with
++    VLLM_ENGRAM_WKV_ROWPAR=1, which must match on every rank).
++
++    The gathered rows are head-major, so a rank whose heads are one equal,
++    contiguous share in TP rank order already holds wkv's input-row shard:
++    it projects those rows alone and one all-reduce of the partial products
++    replaces the all-gather of the rows and the all-gather of wkv's output.
++    Padded heads and DP-sharded tables (other replicas' heads in the rows)
++    break that, and sequence parallelism shards tokens, so those cases and
++    TP=1 keep the column-parallel layout. Every condition reads state the
++    TP ranks share, so all ranks take the same layout.
++    """
++    if os.environ.get("VLLM_ENGRAM_WKV_ROWPAR", "0") != "1":
++        return False
++    tp_size = embedding.tp_size
++    if tp_size == 1:
++        return False
++    if use_sequence_parallel:
++        reason = "sequence parallelism shards tokens, not hash heads"
++    elif embedding.dp_size > 1:
++        reason = f"the tables are DP-sharded over {embedding.dp_size} replicas"
++    elif embedding.part_n_hash_cols * tp_size != embedding.n_hash_cols:
++        reason = (
++            f"{embedding.n_hash_cols} hash heads do not split into "
++            f"{tp_size} equal shares"
++        )
++    else:
++        part = embedding.part_n_hash_cols
++        assert embedding.head_start == get_tensor_model_parallel_rank() * part
++        return True
++    logger.warning_once(
++        "VLLM_ENGRAM_WKV_ROWPAR ignored, Engram wkv stays column-parallel: %s",
++        reason,
++    )
++    return False
++
++
+ class Engram(nn.Module):
+     """Writes an n-gram lookup into the residual stream, gated by how well it
+     matches that stream.
+@@ -1527,6 +1567,7 @@ class Engram(nn.Module):
+ 
+     _prefetch_stream: torch.cuda.Stream | None = None
+     _prefetch_done: torch.cuda.Event | None = None
++    wkv_row_parallel: bool = False
+ 
+     def __init__(
+         self,
+@@ -1554,17 +1595,8 @@ class Engram(nn.Module):
+         # suffix rule.
+         self.embed_tokens = self._create_embedding(layout, layer_hash_index)
+         n_hash_cols = (layout.max_ngram_size - 1) * layout.n_heads
+-        # Without sequence parallelism every TP rank holds every token, so
+-        # shard the output columns instead of replicating the projection.
+-        self.wkv = ColumnParallelLinear(
+-            n_hash_cols * layout.head_dim,
+-            self.dim * (self.hc_mult + 1),
+-            bias=False,
+-            gather_output=True,
+-            quant_config=quant_config,
+-            return_bias=False,
+-            prefix=f"{prefix}.wkv",
+-            disable_tp=use_sequence_parallel,
++        self.wkv = self._create_wkv(
++            n_hash_cols * layout.head_dim, quant_config, use_sequence_parallel, prefix
+         )
+         self.q_weight = nn.Parameter(
+             torch.empty(self.hc_mult, self.dim, dtype=torch.bfloat16),
+@@ -1600,6 +1632,49 @@ class Engram(nn.Module):
+             disk_cache_rows=engram_config.disk_cache_rows,
+         )
+ 
++    def _create_wkv(
++        self,
++        input_size: int,
++        quant_config: QuantizationConfig | None,
++        use_sequence_parallel: bool,
++        prefix: str,
++    ) -> ColumnParallelLinear | RowParallelLinear:
++        output_size = self.dim * (self.hc_mult + 1)
++        self.wkv_row_parallel = engram_wkv_row_parallel(
++            self.embed_tokens, use_sequence_parallel
++        )
++        if self.wkv_row_parallel:
++            # This rank's own heads are wkv's input rows: project them without
++            # gathering and all-reduce the partial products (one collective
++            # instead of two, the same weight bytes a rank).
++            logger.info_once(
++                "Engram wkv row-parallel (VLLM_ENGRAM_WKV_ROWPAR): %d hash heads "
++                "a rank, one all-reduce of [tokens, %d] a layer",
++                self.embed_tokens.part_n_hash_cols,
++                output_size,
++            )
++            return RowParallelLinear(
++                input_size,
++                output_size,
++                bias=False,
++                reduce_results=True,
++                quant_config=quant_config,
++                return_bias=False,
++                prefix=f"{prefix}.wkv",
++            )
++        # Without sequence parallelism every TP rank holds every token, so
++        # shard the output columns instead of replicating the projection.
++        return ColumnParallelLinear(
++            input_size,
++            output_size,
++            bias=False,
++            gather_output=True,
++            quant_config=quant_config,
++            return_bias=False,
++            prefix=f"{prefix}.wkv",
++            disable_tp=use_sequence_parallel,
++        )
++
+     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
+         # Persistent storage keeps lookup addresses stable across graph replays.
+         self.staged_rows = torch.empty(
+@@ -1667,7 +1742,8 @@ class Engram(nn.Module):
+         return self.staged_rows[:num_tokens]
+ 
+     def embed(self, hash_ids: torch.Tensor) -> torch.Tensor:
+-        """Gather heads, returning only local tokens when SP is enabled."""
++        """Gather heads, returning only local tokens when SP is enabled and
++        only this rank's heads (wkv's input rows) when wkv is row-parallel."""
+         rows = self._ready_rows(hash_ids.shape[0])
+         if self.embed_tokens.tp_size == 1:
+             return rows[:, : self.embed_tokens.n_hash_cols]
+@@ -1685,6 +1761,8 @@ class Engram(nn.Module):
+                 local_heads * dim,
+             )
+             return out
++        if self.wkv_row_parallel:
++            return rows
+         rows = tensor_model_parallel_all_gather(rows, dim=1)
+         return rows[:, : self.embed_tokens.n_hash_cols]
+ 

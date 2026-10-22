@@ -18,8 +18,8 @@ CAL=${CALDIR:-/home/spark/dsv41_recipe/caldata}; CALF=${CALF:-cal.safetensors}; 
 REUSE=${REUSE:-}; OLD_PLAN=${OLD_PLAN:-}; P1_EXTRA=${P1_EXTRA:-}; DRY=${DRY:-0}
 MODEL=${OFFICIAL:-/home/spark/models/DeepSeek-V4.1-Flash-official-2cba9e42}   # OFFICIAL= the official checkpoint dir
 if [ "$PART" = 0 ]; then H=$A; P=$B; PEER_IP=$B_IP; NAME=spark1; else H=$B; P=$A; PEER_IP=$A_IP; NAME=spark2; fi
-if [ -n "$REUSE" ]; then RMOUNT="-v $REUSE:/reuse:ro"; RARGS="--reuse /reuse --old-plan /plan/$(basename "$OLD_PLAN")"
-else RMOUNT=""; RARGS=""; fi
+. "$(dirname "$0")/reuse_args.sh"   # REUSE / OLD_PLAN: one path or comma lists, as for run_pass1_2box.sh
+reuse_args || exit 1
 sh_() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$1" "$2"; }
 lf() { printf 'layer_%02d.part%s' "$1" "$2"; }
 
