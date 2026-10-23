@@ -1,5 +1,16 @@
 # dgx-spark-deepseek-v41
 
+> **PLI Labs fork, branch `pli/dgx-spark-offload`** (on top of upstream `cc59c36`, v1.1). Two small launcher changes,
+> both inert by default: `EXTRA_DOCKER_ARGS` (extra `docker run` arguments on both ranks, used to bind-mount offload
+> overlays) and `SERVE_DIR` (keep the generated launch file out of `/tmp`). They support PLI Labs' x86-host offloads for
+> this recipe — Engram tables from host RAM over RDMA (TTFT −5.4 % @32K, −5.7 % @150K) and the DSpark drafter on an
+> RTX 3090 with the freed memory spent on KV (989,460 → 1,604,926 tokens; 4 × 300K concurrent). Measured with our own
+> suite, not yet with this repo's `kit_bench`/oracle. Entries:
+> [combined](https://huggingface.co/ProprietaryLegal/DeepSeek-V4.1-Flash-2xDGX-Spark-x86-offload) ·
+> [findings](https://huggingface.co/ProprietaryLegal/dsv41-spark-offload-findings) ·
+> [GitHub](https://github.com/ProprietaryLegal/pli-labs/tree/main/research/dgx-spark-offload). All credit for the recipe
+> to sudoingX; changes here are Apache-2.0 like the rest of the repo.
+
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 DeepSeek-V4.1-Flash on two NVIDIA DGX Sparks, from weights we quantized out of the official checkpoint, served by upstream vLLM with our patches and one plugin (our own decode kernels), tensor parallel 2 over the ConnectX link. On the same two boxes and client it decodes faster than TensorFold v0.6.0, its newest engine, on code and structured output, with weights closer to the native model than any other pack we measured.
