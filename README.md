@@ -11,6 +11,15 @@
 > [GitHub](https://github.com/ProprietaryLegal/pli-labs/tree/main/research/dgx-spark-offload). All credit for the recipe
 > to sudoingX; changes here are Apache-2.0 like the rest of the repo.
 
+<!-- pli:blurb:start -->
+
+> This fork is maintained by [PLI Labs](https://proprietarylegal.ai/labs.html), the open research arm of [Proprietary Legal Intelligence](https://proprietarylegal.ai); the upstream work and its credit belong to sudoingX. PLI builds AI systems around a legal organization's own work product, combining retrieval, staged workflows, validation, and attorney review. Visit [proprietarylegal.ai](https://proprietarylegal.ai) to explore our work.
+
+**PLI Labs standalone repositories for these offloads:** [stack overview](https://github.com/ProprietaryLegal/DeepSeek-V4.1-Flash-2xDGX-Spark-x86-offload) · [async hand-off](https://github.com/ProprietaryLegal/dsv41-async-hostflag-handoff) · [remote RTX 3090 drafter](https://github.com/ProprietaryLegal/dsv41-remote-dspark-drafter-3090) · [remote Engram](https://github.com/ProprietaryLegal/dsv41-remote-engram-rdma) · [Hugging Face collection](https://huggingface.co/collections/ProprietaryLegal/deepseek-v41-flash-on-2x-dgx-spark-x86-offload-6adab604a517b426ded3916e)
+
+<!-- pli:blurb:end -->
+
+
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 DeepSeek-V4.1-Flash on two NVIDIA DGX Sparks, from weights we quantized out of the official checkpoint, served by upstream vLLM with our patches and one plugin (our own decode kernels), tensor parallel 2 over the ConnectX link. On the same two boxes and client it decodes faster than TensorFold v0.6.0, its newest engine, on code and structured output, with weights closer to the native model than any other pack we measured.
@@ -314,3 +323,19 @@ Calibration (v3, `cal_v3`): 766 sequences, 853,106 tokens = the base set, 374 se
 ---
 
 Independent measurements on two DGX Sparks. Not affiliated with DeepSeek, NVIDIA or the vLLM project. Pinned to vLLM main `6e517b15` and exllamav3 v1.6.0; expect drift as both move.
+
+<!-- pli:footer:start -->
+
+---
+
+## About PLI Labs
+
+“Your proprietary work product is your proprietary intelligence.” PLI Labs is the open research arm of Proprietary Legal Intelligence. We publish legal model prunes, serving recipes for owned hardware, and open-source tools so readers can inspect our methods and test our claims before hiring us.
+
+Founded by a practicing trial lawyer, PLI builds AI systems around a legal organization's own work product: retrieval, staged workflows, validation, and attorney review. The approach grew from systems running on live matters in a litigation practice. Our consulting work supports deployment through approved frontier APIs, private cloud, or open-weight models on hardware you own. Explore the research or contact us about your organization's work.
+
+[Website](https://proprietarylegal.ai) · [PLI Labs](https://proprietarylegal.ai/labs.html) · [Research](https://proprietarylegal.ai/research/index.html) · [GitHub](https://github.com/ProprietaryLegal) · [Hugging Face](https://huggingface.co/ProprietaryLegal) · [Contact](https://proprietarylegal.ai/contact.html)
+
+Proprietary Legal Intelligence LLC is a technology consultancy, not a law firm, and does not provide legal services or legal advice.
+
+<!-- pli:footer:end -->
