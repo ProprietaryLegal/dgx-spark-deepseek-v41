@@ -46,6 +46,10 @@ EXTRA=${EXTRA:-}
 RECIPE_ENV=${RECIPE_ENV-"VLLM_EXL3_MOE_PARALLEL_GROUPS=1 EXL3_MOE_COOP_WIDE=1 EXL3_INT8_GEMV=0 VLLM_DSPARK_DEPTH_POLICY=conf VLLM_DSPARK_ROUND_MS=28.90,32.85,36.57,40.13,42.62,45.69 VLLM_DSPARK_DRAFT_MS=0 VLLM_DSPARK_MARKOV_CACHE=/root/.cache/markov_top_tokens.json EXL3_L2PF=attn,moe,next EXL3_RDMA_AR=1 VLLM_SHORT_CTX_BOUNDS=512,1025 EXL3_ROUTER=1 EXL3_L2PF_HC=1 VLLM_DSPARK_LOCAL_ARGMAX=1 EXL3_SMOE_FLAGS=-DSMOE_RUNFLAGS=1 VLLM_DSV41_MHC_OVERLAP=1 VLLM_ENGRAM_DISK_SPIN_MS=1000 EXL3_MROW_GROUPED=1 VLLM_EXL3_MOE_TF_PROMPT=1 TORCH_EXTENSIONS_DIR=/root/.cache/torch_extensions"}
 DOCKER_ENV=${DOCKER_ENV:-}
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
+# SERVE_DIR: where each node keeps its generated launch file (relative to that node's home, or absolute). Default /tmp,
+# as before. A /tmp file vanishes at reboot, and a docker bind mount of a missing file leaves a root-owned directory in
+# its place that makes the next start's scp fail; set SERVE_DIR to a home path to avoid it.
+SERVE_DIR=${SERVE_DIR:-/tmp}
 # EXTRA_DOCKER_ARGS (optional): extra `docker run` arguments for both ranks, e.g. read-only bind mounts of overlay
 # packages for a remote drafter or remote Engram (PLI Labs x86-host offloads). Empty = unchanged behaviour.
 NAME=dsv41-serve
@@ -80,12 +84,14 @@ launch() {   # $1 node  $2 rank  $3 master ip  $4 self ip  $5 gid
     [ "$rank" != 0 ] && echo "  --headless \\"
     echo "  $EXTRA"
   } > "$tmp"
-  scp -q -o BatchMode=yes "$tmp" "$n:/tmp/$NAME.sh"
+  sh_ "$n" "mkdir -p '$SERVE_DIR' && test ! -d '$SERVE_DIR/$NAME.sh'" \
+    || { rm -f "$tmp"; echo "$n: cannot write $SERVE_DIR/$NAME.sh (a directory is in the way, or $SERVE_DIR cannot be made)" >&2; return 1; }
+  scp -q -o BatchMode=yes "$tmp" "$n:$SERVE_DIR/$NAME.sh"
   rm -f "$tmp"
-  sh_ "$n" "chmod +x /tmp/$NAME.sh; docker rm -f $NAME >/dev/null 2>&1; mkdir -p \$HOME/.cache/dsv41-serve
+  sh_ "$n" "chmod +x '$SERVE_DIR/$NAME.sh'; docker rm -f $NAME >/dev/null 2>&1; mkdir -p \$HOME/.cache/dsv41-serve
     docker run -d --name $NAME --network host --ipc host --shm-size 64g --gpus all --device /dev/infiniband \
       --ulimit memlock=-1 --ulimit stack=67108864 --restart no --entrypoint /bin/bash ${EXTRA_DOCKER_ARGS:-} \
-      -v '$MODEL_DIR':'$MODEL_DIR':ro -v /tmp/$NAME.sh:/serve.sh:ro -v \$HOME/.cache/dsv41-serve:/root/.cache \
+      -v '$MODEL_DIR':'$MODEL_DIR':ro -v \$(realpath '$SERVE_DIR/$NAME.sh'):/serve.sh:ro -v \$HOME/.cache/dsv41-serve:/root/.cache \
       -e NCCL_IB_HCA=$FAB_HCA -e NCCL_IB_GID_INDEX=$gid -e NCCL_IB_DISABLE=0 -e NCCL_NET=IB \
       -e NCCL_SOCKET_IFNAME=$FAB_IF -e GLOO_SOCKET_IFNAME=$FAB_IF -e TP_SOCKET_IFNAME=$FAB_IF \
       -e VLLM_HOST_IP=$self -e VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 -e VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
